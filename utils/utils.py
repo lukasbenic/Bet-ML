@@ -323,7 +323,7 @@ def train_test_model(
         y_train_df = train_df["bsps"]
         if regression:
             y_train_df = train_df["bsps_temp"]
-        
+
         y_train_df.to_csv(y_train_path, index=False)
 
         x_train_df = train_df.drop(["bsps"], axis=1)
@@ -333,9 +333,7 @@ def train_test_model(
     scaler = StandardScaler()
 
     x_train_df = pd.DataFrame(scaler.fit_transform(x_train_df), columns=clm)
-    print(x_train_df)
     y_train_df = y_train_df.values.ravel()
-    print(y_train_df)
 
     mean120_train_df = (
         mean120_train_df if not mean120_train_df is None else x_train_df["mean_120"]
@@ -365,7 +363,17 @@ def train_test_model(
 
     best_params = None
     if not model_name == "Ensemble":
-        n_trials = 20 if model_name in ["RandomForestRegressor", "KNeighborsRegressor", "GradientBoostingRegressor"] else 200
+        n_trials = (
+            5
+            if model_name
+            in [
+                "RandomForestRegressor",
+                "KNeighborsRegressor",
+                "GradientBoostingRegressor",
+                "SVR",
+            ]
+            else 200
+        )
         print(y_train_df)
         # Create Optuna study and optimize hyperparameters
         study = optuna.create_study(sampler=TPESampler(seed=42), direction="maximize")
@@ -458,37 +466,37 @@ def test_model(
 
     metrics = {
         "mse": {
-            "train": mse(y_pred_train, y_train_df),
-            "train_mean_120": mse(mean120_train_df, y_train_df),
-            "test": mse(y_pred_test, y_test_df),
-            "test_mean_120": mse(mean120_test_df, y_test_df),
+            "train": mse(y_train_df, y_pred_train),
+            "train_mean_120": mse(y_train_df, mean120_train_df),
+            "test": mse(y_test_df, y_pred_test),
+            "test_mean_120": mse(y_test_df, mean120_test_df),
         },
         "mae": {
-            "train": mae(y_pred_train, y_train_df),
-            "train_mean_120": mae(mean120_train_df, y_train_df),
-            "test": mae(y_pred_test, y_test_df),
-            "test_mean_120": mae(mean120_test_df, y_test_df),
+            "train": mae(y_train_df, y_pred_train),
+            "train_mean_120": mae(y_train_df, mean120_train_df),
+            "test": mae(y_test_df, y_pred_test),
+            "test_mean_120": mae(y_test_df, mean120_test_df),
         },
-        # "rms": {
-        #     "train": rms(y_pred_train, y_train_df),
-        #     "test_mean_120": rms(mean120_train_df, y_train_df),
-        #     "test": rms(y_pred_test, y_test_df),
-        #     "test_mean_120": rms(mean120_test_df, y_test_df),
-        # },
+        "rms": {
+            "train": rms(y_train_df, y_pred_train),
+            "test_mean_120": rms(y_train_df, mean120_train_df),
+            "test": rms(y_pred_test, y_test_df),
+            "test_mean_120": rms(y_test_df, mean120_test_df),
+        },
         "rmse": {
-            "train": mse(y_pred_train, y_train_df, squared=False),
-            "train_mean_120": mse(mean120_train_df, y_train_df, squared=False),
-            "test": mse(y_pred_test, y_test_df, squared=False),
-            "test_mean_120": mse(mean120_test_df, y_test_df, squared=False),
+            "train": mse(y_train_df, y_pred_train, squared=False),
+            "train_mean_120": mse(y_train_df, mean120_train_df, squared=False),
+            "test": mse(y_test_df, y_pred_test, squared=False),
+            "test_mean_120": mse(y_test_df, mean120_test_df, squared=False),
         },
         "r2_score": {
-            "train": r2_score(y_pred_train, y_train_df),
-            "train_mean_120": r2_score(mean120_train_df, y_train_df),
-            "test": r2_score(y_pred_test, y_test_df),
-            "test_mean_120": r2_score(mean120_test_df, y_test_df),
+            "train": r2_score(y_train_df, y_pred_train),
+            "train_mean_120": r2_score(y_train_df, mean120_train_df),
+            "test": r2_score(y_test_df, y_pred_test),
+            "test_mean_120": r2_score(y_test_df, mean120_test_df),
         },
     }
-
+    pprint(metrics)
     return metrics
 
 
@@ -539,6 +547,7 @@ def normalized_transform(train_df, ticks_df):
         train_df["total_volume"] += train_df[volume_list[i]]
         train_df["sum_mean_volume"] += train_df["mean_and_volume_{}".format(timie)]
         train_df = train_df.drop(["mean_and_volume_{}".format(timie)], axis=1)
+
     train_df["total_vwap"] = train_df["sum_mean_volume"] / train_df["total_volume"]
     train_df = train_df.drop(["sum_mean_volume"], axis=1)
 
@@ -589,7 +598,7 @@ def normalized_transform(train_df, ticks_df):
         train_df["bsps"] = bsps_ticks
         train_df["bsps"] = train_df["bsps"] / train_df["total_vwap"]
     except:
-        print("no bsps in this df")
+        print("BSPS not found in this df.")
 
     train_df = train_df.drop(["total_volume", "total_vwap"], axis=1)
     train_df = train_df.drop(["Unnamed: 0", "selection_ids", "market_id"], axis=1)
