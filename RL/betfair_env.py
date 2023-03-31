@@ -1,3 +1,4 @@
+from collections import defaultdict
 from enum import Enum
 import os
 import gymnasium as gym
@@ -5,11 +6,14 @@ from gymnasium import Discrete, Box, Env, Space
 import joblib
 import numpy as np
 from RL.rl_simulation import FlumineRLSimulation
+from onedrive import Onedrive
 from strategies.rl_strategy import RLStrategy
 from stable_baselines3.common.policies import MlpPolicy
 from stable_baselines3.common.vec_env import DummyVecEnv
-from stable_baselines3 import PPO2
+from stable_baselines3 import PPO
 from flumine import clients
+
+from utils.utils import get_strategy_files, train_test_model
 
 
 class Actions(Enum):
@@ -18,88 +22,82 @@ class Actions(Enum):
 
 
 class FlumineEnv(gym.Env):
-    def __init__(self, strategy):
+    def __init__(self, strategy, markets):
         super(FlumineEnv, self).__init__()
-        self.on_init(FlumineRLSimulation(clients.SimulatedClient()), strategy)
+        self.__init(FlumineRLSimulation(clients.SimulatedClient()), strategy)
         self.action_space = Discrete(3)
         self.state_space = Box(low=-np.inf, high=np.inf, dtype=np.float64)
+        self.market_files = markets
 
-    def on_init(self, flumine_simulator, strategy):
-        self.flumine = flumine_simulator
-        self.flumine.add_strategy(strategy)
-
-    def __next_observation(self):
-        return
+    def __init(self, flumine_simulator, strategy):
+        self.flumine_sim = flumine_simulator
+        self.flumine_sim.add_strategy(strategy)
 
     def step(self, action):
-        """_summary_
-
-        Args:
-            action (_type_): _description_
-
-        Returns:
-            _type_: _description_
-        """
-        # Order has been made and matched - the action should be to send_order
-
-        # Perform the action in the environment
-
-        # send order
-        observation = self.__execute_action(action)
-
-        # Make a decision using Flumine's strategy
-        reward, done = self.strategy.decide(flumine_observation)
-
-        # Convert the decision to the format expected by the environment
-        gym_action = self._decision_to_action(flumine_decision)
-
-        return observation, reward, done, info
+        # Get market data and calculate observation, reward, done, and info
+        self.current_time += 1  # Advance the current time
+        if self.current_time >= self.end_time:
+            self.done = True  # Set done to True if the end time is reached
+        else:
+            self.flumine_simulation.step()  # Advance the simulation by one step
+        market_book = self.flumine_simulation.markets[0].market_book
+        observation = [
+            market_book.runners[0].ex.available_to_back[0].price,
+            market_book.runners[0].ex.available_to_lay[0].price,
+            market_book.runners[0].ex.traded_volume[0].price,
+        ]
+        reward = 0
+        done = self.done
+        info = {}
+        return np.array(observation), reward, done, info
 
     def reset(self):
-        # Reset the environment
-        observation = self.reset()
-
-        # Convert the observation to the format expected by Flumine
-        flumine_observation = self._observation_to_flumine(observation)
-
-        # Reset Flumine's strategy
-        self.strategy.reset(flumine_observation)
-
-        return observation
-
-    def _observation_to_flumine(self, observation):
-        # Convert the observation to the format expected by Flumine
-        # TODO: Implement this method based on your specific environment
-        pass
-
-    def _decision_to_action(self, decision):
-        # Convert the decision to the format expected by the environment
-        # TODO: Implement this method based on your specific environment
-        pass
-
-    def __execute_action(self, action):
-        obseravtion = self.strategy.send_order(Actions(action).name)
-        return obseravtion
+        self.current_time = self.start_time
+        self.done = False
+        self.flumine_simulation.run_to_time(
+            self.current_time
+        )  # Advance the simulation to the desired start time
+        market_book = self.flumine_simulation.markets[0].market_book
+        observation = [
+            market_book.runners[0].ex.available_to_back[0].price,
+            market_book.runners[0].ex.available_to_lay[0].price,
+            market_book.runners[0].ex.traded_volume[0].price,
+        ]
+        return np.array(observation)
 
 
 if __name__ == "__main__":
-    # multiprocess environment
-    regressor = (
-        joblib.load(f"models/BayesianRidge.pkl")
-        if os.path.exists(f"models/BayesianRidge.pkl")
-        else None
+    onedrive = Onedrive()
+    bsp_df, test_analysis_df, market_files, ticks_df = get_strategy_files(onedrive)
+
+    regressor = model, clm, scaler = train_test_model(
+        ticks_df,
+        onedrive,
+        model="BayesianRidge",
     )
-    strategy = RLStrategy(informer=regressor)
 
-    env = DummyVecEnv([lambda: FlumineEnv(RLStrategy())])
+    strategy = RLStrategy(
+        informer=regressor,
+        ticks_df=ticks_df,
+        clm=clm,
+        scaler=scaler,
+        test_analysis_df=test_analysis_df,
+        market_filter={"markets": market_files},
+        max_trade_count=100000,
+        max_live_trade_count=100000,
+        max_order_exposure=10000,
+        max_selection_exposure=100000,
+    )
 
-    model = PPO2(MlpPolicy, env, verbose=1)
+    env = DummyVecEnv([lambda: FlumineEnv(strategy, market_files)])
+
+    model = PPO(MlpPolicy, env, verbose=1)
     model.learn(total_timesteps=25000)
     model.save("ppo2_pre_horse_race")
 
     del model  # remove to demonstrate saving and loading
 
-    model = PPO2.load("ppo2_pre_horse_race")
+    model = PPO.load("ppo2_pre_horse_race")
 
     # Enjoy trained agent
     obs = env.reset()

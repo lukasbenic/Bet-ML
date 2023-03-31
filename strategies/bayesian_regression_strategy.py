@@ -8,27 +8,25 @@ from flumine.order.order import LimitOrder, MarketOnCloseOrder, OrderStatus
 from flumine.markets.market import Market
 from betfairlightweight.resources import MarketBook, RunnerBook
 from sklearn.preprocessing import StandardScaler
+import torch
 
 from utils.constants import TIME_BEFORE_START
 
 from toms_utils import normalized_transform
+from utils.utils import preprocess_test_analysis
 
 
-class Strategy1(BaseStrategy):
+class BayesianRegressionStrategy(BaseStrategy):
     def __init__(
         self,
-        scaler: StandardScaler,
         ticks_df: pd.DataFrame,
         test_analysis_df: pd.DataFrame,
         model,
-        clm,
         *args,
         **kwargs,
     ):
-        self.scaler = scaler
         self.ticks_df = ticks_df
         self.model = model
-        self.clm = clm
         self.test_analysis_df = test_analysis_df
         self.metrics = {
             "profit": 0,
@@ -61,11 +59,9 @@ class Strategy1(BaseStrategy):
         self.runner_number = None
 
         super_kwargs = kwargs.copy()
-        super_kwargs.pop("scaler", None)
         super_kwargs.pop("ticks_df", None)
         super_kwargs.pop("test_analysis_df", None)
         super_kwargs.pop("model", None)
-        super_kwargs.pop("clm", None)
         super().__init__(*args, **super_kwargs)
 
     # back and lay in here
@@ -169,24 +165,6 @@ class Strategy1(BaseStrategy):
 
         self.metrics["q_margin"] += size * (price_adjusted - bsp_value) / price_adjusted
 
-    def __preprocess_test_analysis(self):
-        test_analysis_df = self.test_analysis_df.dropna()
-        test_analysis_df = test_analysis_df[
-            (test_analysis_df["mean_120"] <= 50) & (test_analysis_df["mean_120"] > 1.1)
-        ]
-        test_analysis_df = test_analysis_df[test_analysis_df["mean_14400"] > 0]
-        test_analysis_df = test_analysis_df.drop(
-            test_analysis_df[test_analysis_df["std_2700"] > 1].index
-        )
-
-        test_analysis_df_y = pd.DataFrame().assign(
-            market_id=test_analysis_df["market_id"],
-            selection_ids=test_analysis_df["selection_ids"],
-            bsps=test_analysis_df["bsps"],
-        )
-
-        return test_analysis_df, test_analysis_df_y
-
     def __get_model_prediction_and_mean_120(
         self, test_analysis_df: pd.DataFrame, runner: RunnerBook, market_id: float
     ) -> Tuple[np.float64, np.float64]:
@@ -197,8 +175,19 @@ class Strategy1(BaseStrategy):
         mean_120 = predict_row["mean_120"].values[0]
         predict_row = normalized_transform(predict_row, self.ticks_df)
         predict_row = predict_row.drop(["bsps_temp", "bsps"], axis=1)
-        predict_row = pd.DataFrame(self.scaler.transform(predict_row), columns=self.clm)
-        runner_predicted_bsp = self.model.predict(predict_row)
+        predict_row = pd.DataFrame(predict_row)
+
+        # Convert the input to a PyTorch tensor
+        predict_tensor = torch.tensor(predict_row.values, dtype=torch.float32).to(
+            self.device
+        )
+
+        # Predict
+        with torch.no_grad():
+            _, output = self.model(predict_tensor)
+
+        # Convert the output tensor back to a NumPy array
+        runner_predicted_bsp = output.cpu().numpy().squeeze()
 
         return runner_predicted_bsp, mean_120
 
@@ -216,7 +205,7 @@ class Strategy1(BaseStrategy):
             "number"
         ]
         number_adjust = number
-        confidence_number = number + 4
+        confidence_number = number + 10
         confidence_price = self.ticks_df.iloc[
             self.ticks_df["number"].sub(confidence_number).abs().idxmin()
         ]["tick"]
@@ -271,7 +260,7 @@ class Strategy1(BaseStrategy):
                         (
                             test_analysis_df,
                             test_analysis_df_y,
-                        ) = self.__preprocess_test_analysis()
+                        ) = preprocess_test_analysis(self.test_analysis_df)
                         # if bsps not available skip
                         (
                             runner_predicted_bsp,
@@ -301,6 +290,15 @@ class Strategy1(BaseStrategy):
                             test_analysis_df_y, mean_120, runner, market_id
                         )
 
+                        print(
+                            "back order conditions:",
+                            f"pred_bsp {runner_predicted_bsp}",
+                            f"confidence_price {confidence_price}",
+                            runner_predicted_bsp < confidence_price,
+                            mean_120 <= 50,
+                            mean_120 > 1.1,
+                            not runner_in_back_tracker,
+                        )
                         # SEND BACK BET ORDER
                         if (
                             (runner_predicted_bsp < confidence_price)
@@ -308,6 +306,7 @@ class Strategy1(BaseStrategy):
                             and (mean_120 > 1.1)
                             and not runner_in_back_tracker
                         ):
+                            print("sent back bet")
                             self.back_bet_tracker[market_id].setdefault(
                                 runner.selection_id, {}
                             )
@@ -330,6 +329,8 @@ class Strategy1(BaseStrategy):
                             and (price_adjusted > 1.1)
                             and not runner_in_lay_tracker
                         ):
+                            print("sent lay bet")
+
                             self.lay_bet_tracker[market_id].setdefault(
                                 runner.selection_id, {}
                             )
@@ -474,6 +475,7 @@ class Strategy1(BaseStrategy):
                             ):
                                 bsp_value = tracker[market_id][selection_id][1]
                                 price = tracker[market_id][selection_id][-1]
+
                                 if self.seconds_to_start < TIME_BEFORE_START:
                                     self.metrics["amount_gambled"] += (
                                         order.size_matched

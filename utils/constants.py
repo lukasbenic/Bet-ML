@@ -1,3 +1,17 @@
+from sklearn.linear_model import (
+    BayesianRidge,
+    LinearRegression,
+    Ridge,
+    Lasso,
+    ElasticNet,
+)
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.svm import SVR
+from sklearn.neighbors import KNeighborsRegressor
+
+from ensemble_regressor import EnsembleRegressor
+
 FIELD_NAMES = [
     "bet_id",
     "strategy_name",
@@ -60,3 +74,17 @@ STRATEGY_COL_NAMES = [
     "volume_traded_at_Lprice3",
     "reasonable_lay_WoM",
 ]
+
+regression_models = {
+    "LinearRegression": LinearRegression,
+    "Ridge": Ridge,
+    "Lasso": Lasso,
+    "ElasticNet": ElasticNet,
+    "DecisionTreeRegressor": DecisionTreeRegressor,
+    "RandomForestRegressor": RandomForestRegressor,
+    "GradientBoostingRegressor": GradientBoostingRegressor,
+    "SVR": SVR,
+    "KNeighborsRegressor": KNeighborsRegressor,
+    "BayesianRidge": BayesianRidge,
+    "Ensemble": EnsembleRegressor,
+}

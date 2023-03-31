@@ -2,18 +2,49 @@ import logging
 import os
 import time
 from pprint import pprint
+import pyro
+import torch
 
 import yaml
+from deep_learning.bayesian_regression import (
+    BayesianRegressionModel,
+    model_gamma,
+    prepare_data,
+    train_bayesian_regression,
+)
 from onedrive import Onedrive
-from strategies.strategy1 import Strategy1
+from strategies.mean_120_regression_strategy import Mean120RegressionStrategy
 from flumine import FlumineSimulation
 from pythonjsonlogger import jsonlogger
 from flumine.clients import SimulatedClient
+from strategies.bayesian_regression_strategy import (
+    BayesianRegressionStrategy,
+)
+from pyro.infer import SVI, Trace_ELBO
+from pyro.optim import ClippedAdam, SGD
+from pyro.infer.autoguide import AutoDiagonalNormal
 
-from utils.utils import process_run_results, train_test_model, update_tracker
+# from pyro.params.param_store import get_param_store
 
 
-def run(strategy: Strategy1, client: SimulatedClient, races):
+from utils.utils import (
+    train_test_model,
+    update_tracker,
+)
+from deep_learning.vae_regressor import VAE
+
+import atexit
+import multiprocessing as mp
+
+
+def cleanup():
+    mp.set_start_method("spawn", force=True)
+
+
+atexit.register(cleanup)
+
+
+def run(strategy, client: SimulatedClient, races):
     framework = FlumineSimulation(client=client)
     framework.add_strategy(strategy)
     market_files = strategy.market_filter["markets"]
@@ -40,6 +71,7 @@ def run(strategy: Strategy1, client: SimulatedClient, races):
     }
 
     for index, market_file in enumerate(market_files):
+        print(len(market_files))
         # for smaller test run
         if races and index == races:
             break
@@ -69,27 +101,28 @@ def run(strategy: Strategy1, client: SimulatedClient, races):
     return tracker
 
 
-# Might want to re-write to fit in strategy class file
 def get_strategy(
     strategy: str,
     market_file,  #: List[str] | str,
     onedrive: Onedrive,
     model_name: str,
-) -> Strategy1:
+):
+    mp.set_start_method("spawn", force=True)
     market_file = market_file if isinstance(market_file, list) else [market_file]
 
     ticks_df = onedrive.get_folder_contents(
         target_folder="ticks", target_file="ticks.csv"
     )
-    model, clm, scaler = train_test_model(
-        ticks_df,
-        onedrive,
-        model=model_name,
-    )
+
     test_analysis_df = onedrive.get_test_df(target_folder="Analysis_files")
 
-    if strategy == "Strategy1":
-        strategy_pick = Strategy1(
+    if strategy == "Mean120RegressionStrategy":
+        model, clm, scaler = train_test_model(
+            ticks_df,
+            onedrive,
+            model_name=model_name,
+        )
+        strategy_pick = Mean120RegressionStrategy(
             model=model,
             ticks_df=ticks_df,
             clm=clm,
@@ -101,7 +134,43 @@ def get_strategy(
             max_order_exposure=10000,
             max_selection_exposure=100000,
         )
-        return strategy_pick
+
+    if strategy == "BayesianRegressionStrategy":
+        x_train_tensor, y_train_tensor = prepare_data(
+            x_train_path="utils/x_train_df.csv", y_train_path="utils/y_train_df.csv"
+        )
+
+        print(y_train_tensor.shape)
+        print("data prepared")
+
+        optimizer = ClippedAdam(
+            {"lr": 1.0e-3, "lrd": 0.1, "clip_norm": 10.0},
+        )
+
+        num_features = x_train_tensor.shape[1]
+        br = BayesianRegressionModel(num_features)
+        my_guide = AutoDiagonalNormal(model_gamma)
+
+        pyro.clear_param_store()
+        svi = SVI(model_gamma, my_guide, optimizer, loss=Trace_ELBO())
+
+        if os.path.exists(f"models/{model_name}.pkl"):
+            print("Loaded pre-existing VAE model.")
+        else:
+            print("Commencing SVI training...")
+            train_bayesian_regression(svi, x_train_tensor, y_train_tensor, 1, 500)
+
+        strategy_pick = BayesianRegressionStrategy(
+            model=svi,
+            ticks_df=ticks_df,
+            test_analysis_df=test_analysis_df,
+            market_filter={"markets": market_file},
+            max_trade_count=100000,
+            max_live_trade_count=100000,
+            max_order_exposure=10000,
+            max_selection_exposure=100000,
+        )
+    return strategy_pick
 
 
 def piped_run(
@@ -140,6 +209,7 @@ def piped_run(
         if float(f_name) in bsp_df["EVENT_ID"].values
     ]
     strategy_pick = get_strategy(strategy, file_paths, onedrive, model_name)
+    print("herehereherhre")
     tracker = run(strategy_pick, client, races)
 
     if save:
