@@ -5,9 +5,8 @@ import pandas as pd
 from office365.runtime.auth.authentication_context import AuthenticationContext
 from office365.sharepoint.client_context import ClientContext
 from office365.sharepoint.files.file import File
-from utils.config import app_principal, SITE_URL
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 from utils.constants import ANALYSIS_FILES_TEST, ANALYSIS_FILES_TRAIN
 
@@ -186,11 +185,11 @@ class Onedrive:
         return bsp_df
 
 
-if __name__ == "__main__":
-    onedrive = Onedrive(
-        client_id=app_principal["client_id"],
-        client_secret=app_principal["client_secret"],
-        site_url=SITE_URL,
-    )
+# if __name__ == "__main__":
+#     onedrive = Onedrive(
+#         client_id=app_principal["client_id"],
+#         client_secret=app_principal["client_secret"],
+#         site_url=SITE_URL,
+#     )
 
-    onedrive.download_test_folder()
+#     onedrive.download_test_folder()

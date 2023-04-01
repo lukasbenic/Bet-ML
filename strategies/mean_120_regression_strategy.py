@@ -57,13 +57,9 @@ class Mean120RegressionStrategy(BaseStrategy):
         self.matched_back_bet_tracker = {}
         self.lay_bet_tracker = {}
         self.matched_lay_bet_tracker = {}
-        # self.order_dict_back = {}
-        # self.order_dict_lay = {}
-        # self.LP_traded = {}
-        # self.prediction_status_tracker = {}
         self.seconds_to_start = None
         self.market_open = True
-        self.stake = 50  # @WHAT IS THIS
+        self.stake = 50
         self.first_nonrunners = True
         self.runner_number = None
 
@@ -85,11 +81,23 @@ class Mean120RegressionStrategy(BaseStrategy):
         self.test_analysis_df = test_analysis_df
         self.test_analysis_df_y = test_analysis_df_y
 
-    def reset_metrics(self):
+    def reset(self) -> None:
         self.metrics = dict.fromkeys(self.metrics, 0)
+        self.regression = True
+        self.back_bet_tracker = {}
+        self.matched_back_bet_tracker = {}
+        self.lay_bet_tracker = {}
+        self.matched_lay_bet_tracker = {}
+        self.seconds_to_start = None
+        self.market_open = True
+        self.stake = 50
+        self.first_nonrunners = True
+        self.runner_number = None
+        print("strategy params reset")
 
     def set_market_filter(self, market_filter: Union[dict, list]) -> None:
         self.market_filter = market_filter
+        print("market filter set")
 
     def check_market_book(self, market: Market, market_book: MarketBook) -> bool:
         # process_market_book only executed if this returns True
@@ -144,6 +152,7 @@ class Mean120RegressionStrategy(BaseStrategy):
             if market_id not in self.back_bet_tracker.keys():
                 self.back_bet_tracker[market_id] = {}
                 self.matched_back_bet_tracker[market_id] = {}
+
             if self._should_skip_runner(market_id, runner):
                 continue
             (
@@ -155,43 +164,64 @@ class Mean120RegressionStrategy(BaseStrategy):
                 continue
 
             (
-                price_adjusted,
-                confidence_price,
-                bsp_value,
+                back_price_adjusted,
+                back_confidence_price,
+                back_bsp_value,
             ) = self._get_adjusted_prices(
-                market_id=market_id,
-                runner=runner,
-                mean_120=mean_120,
+                market_id=market_id, runner=runner, mean_120=mean_120, side="BACK"
             )
 
-            # print("pred", runner_predicted_bsp > confidence_price)
+            (
+                lay_price_adjusted,
+                lay_confidence_price,
+                lay_bsp_value,
+            ) = self._get_adjusted_prices(
+                market_id=market_id, runner=runner, mean_120=mean_120, side="LAY"
+            )
 
-            # print("stake", price_adjusted <= self.stake)
-            # print("adjust", price_adjusted > 1.1)
-            # print(
-            #     "runner in",
-            #     # runner.selection_id in self.lay_bet_tracker[market_id].keys(),
-            #     self.lay_bet_tracker,
-            # )
-            print("predicted", runner_predicted_bsp, "confidence", confidence_price)
+            # here is action back
             if (
-                runner_predicted_bsp < confidence_price
+                runner_predicted_bsp < back_confidence_price
                 and mean_120 <= 50
                 and mean_120 > 1.1
                 and runner.selection_id not in self.back_bet_tracker[market_id].keys()
             ):
+                print(
+                    "predicted",
+                    runner_predicted_bsp,
+                    "confidence",
+                    back_confidence_price,
+                )
                 self._send_bet(
-                    market_id, runner, price_adjusted, bsp_value, market, side="BACK"
+                    market_id,
+                    runner,
+                    back_price_adjusted,
+                    back_bsp_value,
+                    market,
+                    side="BACK",
                 )
 
+            # here is action lay
             if (
-                runner_predicted_bsp > confidence_price
-                and price_adjusted <= self.stake
-                and price_adjusted > 1.1
+                runner_predicted_bsp > lay_confidence_price
+                and lay_price_adjusted <= self.stake
+                and lay_price_adjusted > 1.1
                 and runner.selection_id not in self.lay_bet_tracker[market_id].keys()
             ):
+                print(
+                    "predicted",
+                    runner_predicted_bsp,
+                    "confidence",
+                    back_confidence_price,
+                )
+
                 self._send_bet(
-                    market_id, runner, price_adjusted, bsp_value, market, side="LAY"
+                    market_id,
+                    runner,
+                    lay_price_adjusted,
+                    lay_bsp_value,
+                    market,
+                    side="LAY",
                 )
 
     def process_orders(self, market: Market, orders: list) -> None:
@@ -397,6 +427,9 @@ class Mean120RegressionStrategy(BaseStrategy):
             .isin([runner.selection_id])
             .any()
             or not self.test_analysis_df["market_id"].isin([market_id]).any()
+            # ONLY ONE BET/PREDICTION FOR EACH RUNNENR IN EACH MARKET MAX
+            or runner.selection_id in self.back_bet_tracker[market_id].keys()
+            or runner.selection_id in self.lay_bet_tracker[market_id].keys()
         ):
             return True
         return False
@@ -530,6 +563,7 @@ class Mean120RegressionStrategy(BaseStrategy):
         mean_120: np.float64,
         runner: RunnerBook,
         market_id: float,
+        side: str,
     ) -> Tuple[np.float64, np.float64, np.float64]:
         """
         Calculate adjusted prices for back and lay bets along with the BSP value.
@@ -544,7 +578,7 @@ class Mean120RegressionStrategy(BaseStrategy):
             "number"
         ]
         number_adjust = number
-        confidence_number = number + 4
+        confidence_number = number + 4 if side == "LAY" else number - 4
         confidence_price = self.ticks_df.iloc[
             self.ticks_df["number"].sub(confidence_number).abs().idxmin()
         ]["tick"]

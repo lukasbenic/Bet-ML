@@ -7,39 +7,60 @@ from pyro.infer import SVI, Trace_ELBO
 import pyro.contrib.autoguide as autoguide
 from torch.utils.data import TensorDataset, DataLoader
 import pyro.nn as pnn
+from pyro.infer.autoguide import AutoDiagonalNormal
 
 
 class RegressionModel(pnn.PyroModule):
     def __init__(self, input_features, output_features=1):
         super().__init__()
-        self.linear = torch.nn.Linear(input_features, output_features)
+        self.linear = pnn.PyroModule[torch.nn.Linear](input_features, output_features)
         self.sigmoid = torch.nn.Sigmoid()
 
     def forward(self, x):
         return self.sigmoid(self.linear(x)).squeeze(-1)
 
 
-class BayesianRegressionModel:
+class BayesianRegressionModel(pnn.PyroModule):
+    def __init__(self, in_features, out_features=1):
+        super().__init__()
+        self.linear = pnn.PyroModule[torch.nn.Linear](in_features, out_features)
+        self.linear.weight = pnn.PyroSample(
+            dist.Normal(0.0, 1.0).expand([out_features, in_features]).to_event(2)
+        )
+        self.linear.bias = pnn.PyroSample(
+            dist.Normal(0.0, 10.0).expand([out_features]).to_event(0)
+        )
+
+    def forward(self, x, y=None):
+        sigma = pyro.sample("sigma", dist.Uniform(0.0, 10.0))
+        mean = (
+            self.linear(x).squeeze(-1).unsqueeze(-1)
+        )  # Add unsqueeze operation to mean
+        sigma = sigma.unsqueeze(-1)  # Add unsqueeze operation to sigma
+        with pyro.plate("data", x.shape[0]):
+            obs = pyro.sample("obs", dist.Normal(mean, sigma).to_event(0), obs=y)
+        return mean
+
+
+class BayesianRegressionModel2(pnn.PyroModule):
     def __init__(self, num_features):
-        self.regression_model = RegressionModel(num_features)
-        self.num_features = num_features
+        super().__init__()
+        self.linear = pnn.PyroModule[torch.nn.Linear](num_features, 1)
+        self.sigmoid = torch.nn.Sigmoid()
+
+        # Define priors
+        self.linear.weight = pnn.PyroSample(
+            dist.Normal(
+                torch.zeros(num_features, 1), torch.ones(num_features, 1)
+            ).to_event(2)
+        )
+        self.linear.bias = pnn.PyroSample(
+            dist.Normal(torch.tensor([0.0]), torch.tensor([10.0]))
+        )
 
     def model(self, x_data, y_data):
-        # Define the priors for the weight and bias parameters
-        weight_prior = dist.Normal(
-            torch.zeros(self.num_features, 1), torch.ones(self.num_features, 1)
-        ).to_event(2)
-        bias_prior = dist.Normal(torch.tensor([0.0]), torch.tensor([10.0]))
-
-        # Wrap the priors using Pyro's plate construct
-        priors = {"linear.weight": weight_prior, "linear.bias": bias_prior}
-        lifted_module = pyro.random_module("module", self.regression_model, priors)
-
-        # Instantiate the lifted module (i.e., sample the priors)
-        lifted_regression_model = lifted_module()
-
         with pyro.plate("data", len(x_data)):
-            prediction_mean = lifted_regression_model(x_data).squeeze()
+            prediction_mean = self.forward(x_data).squeeze()
             pyro.sample(
                 "obs",
                 dist.Normal(prediction_mean, 1.0),
@@ -47,10 +68,10 @@ class BayesianRegressionModel:
             )
 
     def guide(self, x_data, y_data):
-        weight_loc = pyro.param("weight_loc", torch.randn(self.num_features, 1))
+        weight_loc = pyro.param("weight_loc", torch.randn(self.linear.in_features, 1))
         weight_scale = pyro.param(
             "weight_scale",
-            torch.ones(self.num_features, 1),
+            torch.ones(self.linear.in_features, 1),
             constraint=dist.constraints.positive,
         )
         bias_loc = pyro.param("bias_loc", torch.randn(1))
@@ -61,21 +82,19 @@ class BayesianRegressionModel:
         weight_dist = dist.Normal(weight_loc, weight_scale).to_event(2)
         bias_dist = dist.Normal(bias_loc, bias_scale)
 
-        # Wrap the priors using Pyro's plate construct
-        dists = {"linear.weight": weight_dist, "linear.bias": bias_dist}
-        lifted_module = pyro.random_module("module", self.regression_model, dists)
+        self.linear.weight = pnn.PyroSample(weight_dist)
+        self.linear.bias = pnn.PyroSample(bias_dist)
 
-        # Instantiate the lifted module (i.e., sample the priors)
-        lifted_regression_model = lifted_module()
+        # with pyro.plate("data", len(x_data)):
+        prediction_mean = self.forward(x_data).squeeze()
 
-        with pyro.plate("data", len(x_data)):
-            prediction_mean = lifted_regression_model(x_data).squeeze()
-            pyro.sample("obs", dist.Normal(prediction_mean, 1.0))
+    def forward(self, x):
+        return self.linear(x).squeeze(-1)
 
 
 def prepare_data(x_train_path, y_train_path):
-    x_train_df = pd.read_csv(x_train_path).drop(columns=["Unnamed: 0"])
-    y_train_df = pd.read_csv(y_train_path).drop(columns=["Unnamed: 0"])
+    x_train_df = pd.read_csv(x_train_path)
+    y_train_df = pd.read_csv(y_train_path)
 
     x_train_tensor = torch.tensor(x_train_df.values).float()
     y_train_tensor = torch.tensor(y_train_df.values).float()

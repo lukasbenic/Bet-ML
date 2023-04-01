@@ -216,11 +216,11 @@ class RLStrategy(BaseStrategy):
                         (
                             runner_predicted_bsp,
                             mean_120,
-                            predict_row
+                            predict_row,
                         ) = self.__get_model_prediction_and_mean_120(
                             test_analysis_df, runner, market_id
                         )
-                        
+
                         predict_row["runner_predicted_bsp"] = runner_predicted_bsp
                         self.observation = predict_row
 

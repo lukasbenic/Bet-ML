@@ -23,6 +23,7 @@ from strategies.bayesian_regression_strategy import (
 from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import ClippedAdam, SGD
 from pyro.infer.autoguide import AutoDiagonalNormal
+from strategies.rl_strategy import RLStrategy
 
 # from pyro.params.param_store import get_param_store
 
@@ -44,7 +45,11 @@ def cleanup():
 atexit.register(cleanup)
 
 
-def run(strategy, client: SimulatedClient, races):
+def run(
+    strategy: Mean120RegressionStrategy | BayesianRegressionStrategy | RLStrategy,
+    client: SimulatedClient,
+    races: int,
+):
     framework = FlumineSimulation(client=client)
     framework.add_strategy(strategy)
     market_files = strategy.market_filter["markets"]
@@ -70,19 +75,11 @@ def run(strategy, client: SimulatedClient, races):
         "total_q_margin": 0,
     }
 
-    for index, market_file in enumerate(market_files):
+    for index, market_file in enumerate(market_files[0:races]):
         print(len(market_files))
-        # for smaller test run
-        if races and index == races:
-            break
-
-        market_filter = {"markets": [market_file]}
-
         print(f"Race {index + 1}/{races}")
-        print("lukas markets", framework.markets)
-
-        strategy.set_market_filter(market_filter=market_filter)
-        strategy.reset_metrics()
+        strategy.set_market_filter(market_filter={"markets": [market_file]})
+        strategy.reset()
 
         framework.run()
         print(f"Race {index + 1} finished...")
@@ -103,12 +100,12 @@ def run(strategy, client: SimulatedClient, races):
 
 def get_strategy(
     strategy: str,
-    market_file,  #: List[str] | str,
+    market_files,  #: List[str] | str,
     onedrive: Onedrive,
     model_name: str,
 ):
-    mp.set_start_method("spawn", force=True)
-    market_file = market_file if isinstance(market_file, list) else [market_file]
+    # mp.set_start_method("spawn", force=True)
+    market_files = market_files if isinstance(market_files, list) else [market_files]
 
     ticks_df = onedrive.get_folder_contents(
         target_folder="ticks", target_file="ticks.csv"
@@ -128,7 +125,7 @@ def get_strategy(
             clm=clm,
             scaler=scaler,
             test_analysis_df=test_analysis_df,
-            market_filter={"markets": market_file},
+            market_filter={"markets": market_files},
             max_trade_count=100000,
             max_live_trade_count=100000,
             max_order_exposure=10000,
@@ -149,10 +146,10 @@ def get_strategy(
 
         num_features = x_train_tensor.shape[1]
         br = BayesianRegressionModel(num_features)
-        my_guide = AutoDiagonalNormal(model_gamma)
+        guide = AutoDiagonalNormal(br)
 
         pyro.clear_param_store()
-        svi = SVI(model_gamma, my_guide, optimizer, loss=Trace_ELBO())
+        svi = SVI(br, guide, optimizer, loss=Trace_ELBO())
 
         if os.path.exists(f"models/{model_name}.pkl"):
             print("Loaded pre-existing VAE model.")
@@ -203,12 +200,12 @@ def piped_run(
         onedrive.download_test_folder(target_folder="horses_jul_wins")
         print("Test folder download finished.")
 
-    file_paths = [
+    market_files = [
         os.path.join(test_folder_path, f_name)
         for f_name in test_folder_files
         if float(f_name) in bsp_df["EVENT_ID"].values
     ]
-    strategy_pick = get_strategy(strategy, file_paths, onedrive, model_name)
+    strategy_pick = get_strategy(strategy, market_files, onedrive, model_name)
     print("herehereherhre")
     tracker = run(strategy_pick, client, races)
 

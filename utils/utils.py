@@ -278,56 +278,9 @@ def train_test_model(
     y_train_path="utils/y_train_df.csv",
     model_path="models/",
 ):
-    x_train_df = (
-        pd.read_csv(x_train_path, index_col=False)
-        if os.path.exists(x_train_path)
-        else None
+    x_train_df, y_train_df, mean120_train_df = get_train_data(
+        x_train_path, y_train_path, onedrive, ticks_df, regression
     )
-    y_train_df = (
-        pd.read_csv(y_train_path, index_col=False)
-        if os.path.exists(y_train_path)
-        else None
-    )
-    print(y_train_df)
-    mean120_train_df = None
-
-    # Pre-process data
-    if x_train_df is None or y_train_df is None:
-        print(
-            "x_train_df and/or y_train_df not found, commencing fetch and normalization..."
-        )
-        train_df = onedrive.get_train_df()
-        train_df = normalized_transform(train_df, ticks_df)
-        print("Finished train data normalization...")
-
-        mean120_actual_train = train_df["mean_120_temp"]
-        if not regression:
-            train_df = train_df.drop(["mean_120_temp"], axis=1)
-
-        mean120_train_df = train_df["mean_120"]
-        bsp_train_df = train_df["bsps"]
-        train_df["bsps"] = ((mean120_train_df - bsp_train_df) > 0).astype(int)
-
-        df_majority = train_df[(train_df["bsps"] == 0)]
-        df_minority = train_df[(train_df["bsps"] == 1)]
-
-        # downsample majority
-        df_majority = df_majority.head(
-            len(df_minority)
-        )  # because I don't trust the resample
-
-        # Combine majority class with upsampled minority class
-        train_df = pd.concat([df_minority, df_majority])
-        mean120_train_df = train_df["mean_120"]
-
-        y_train_df = train_df["bsps"]
-        if regression:
-            y_train_df = train_df["bsps_temp"]
-
-        y_train_df.to_csv(y_train_path, index=False)
-
-        x_train_df = train_df.drop(["bsps"], axis=1)
-        x_train_df = x_train_df.drop(["bsps_temp"], axis=1)
 
     clm = x_train_df.columns
     scaler = StandardScaler()
@@ -642,3 +595,57 @@ def preprocess_test_analysis(test_analysis_df):
     )
 
     return test_analysis_df, test_analysis_df_y
+
+
+def get_train_data(x_train_path, y_train_path, onedrive, ticks_df, regression):
+    x_train_df = (
+        pd.read_csv(x_train_path, index_col=False)
+        if os.path.exists(x_train_path)
+        else None
+    )
+    y_train_df = (
+        pd.read_csv(y_train_path, index_col=False)
+        if os.path.exists(y_train_path)
+        else None
+    )
+    mean120_train_df = None
+
+    # Pre-process data
+    if x_train_df is None or y_train_df is None:
+        print(
+            "x_train_df and/or y_train_df not found, commencing fetch and normalization..."
+        )
+        train_df = onedrive.get_train_df()
+        train_df = normalized_transform(train_df, ticks_df)
+        print("Finished train data normalization...")
+
+        mean120_actual_train = train_df["mean_120_temp"]
+        if not regression:
+            train_df = train_df.drop(["mean_120_temp"], axis=1)
+
+        mean120_train_df = train_df["mean_120"]
+        bsp_train_df = train_df["bsps"]
+        train_df["bsps"] = ((mean120_train_df - bsp_train_df) > 0).astype(int)
+
+        df_majority = train_df[(train_df["bsps"] == 0)]
+        df_minority = train_df[(train_df["bsps"] == 1)]
+
+        # downsample majority
+        df_majority = df_majority.head(
+            len(df_minority)
+        )  # because I don't trust the resample
+
+        # Combine majority class with upsampled minority class
+        train_df = pd.concat([df_minority, df_majority])
+        mean120_train_df = train_df["mean_120"]
+
+        y_train_df = train_df["bsps"]
+        if regression:
+            y_train_df = train_df["bsps_temp"]
+
+        y_train_df.to_csv(y_train_path, index=False)
+
+        x_train_df = train_df.drop(["bsps"], axis=1)
+        x_train_df = x_train_df.drop(["bsps_temp"], axis=1)
+
+    return x_train_df, y_train_df, mean120_train_df
