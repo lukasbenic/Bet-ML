@@ -17,7 +17,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--races",
         type=int,
-        default=1,
+        default=929,
         help="Number of races(markets) to run, the max is 929",
     )
     parser.add_argument(
@@ -32,25 +32,24 @@ if __name__ == "__main__":
     parser.add_argument(
         "--strategy_name",
         type=str,
-        default="BayesianRegressionStrategy",
+        default="Mean120Regression",
         help="Name of the strategy to use",
     )
     parser.add_argument(
         "--model_name",
         type=str,
-        default="BayesianRegression",
+        default="Ensemble",
         help="Name of the model to use",
     )
     args = parser.parse_args()
 
     tracker = piped_run(
-        strategy=args.strategy_name,
+        strategy_name=args.strategy_name,
         onedrive=Onedrive(
             client_id=app_principal["client_id"],
             client_secret=app_principal["client_secret"],
             site_url=SITE_URL,
         ),
-        client=clients.SimulatedClient(),
         test_folder_path=args.test_folder_path,
         bsps_path=args.bsps_path,
         model_name=args.model_name,

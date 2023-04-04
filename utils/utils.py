@@ -120,7 +120,7 @@ def create_best_model(best_params, model_name, x_train_df, y_train_df):
             if len(model.split("_")) == 1
         ]
         print("Models used for Ensemble")
-        [print(model) for model in model_files]
+        [print(model) for model in model_files if len(model.split("_")) == 1]
         model = EnsembleRegressor(ensemble_models)
     else:
         raise ValueError(f"Invalid model name '{model_name}'")
@@ -140,7 +140,7 @@ def update_tracker(tracker: dict, metrics: dict):
         name_lst = key.split("_")
         m_key = "_".join(name_lst[1:])
 
-        if key == "race_counter":
+        if key in ["race_counter", "balance"]:
             continue
 
         # update non-list items in tracker
@@ -157,6 +157,7 @@ def update_tracker(tracker: dict, metrics: dict):
                 item.append(tracker["total_green_margin"])
 
     tracker["race_counter"] += 1
+    pprint(tracker)
     return tracker
 
 
