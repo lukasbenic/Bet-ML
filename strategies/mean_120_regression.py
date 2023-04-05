@@ -326,7 +326,9 @@ class Mean120Regression(BaseStrategy):
                 return
             matched_tracker[market_id][selection_id] = True
             self._process_matched_order(
+                market,
                 side,
+                tracker,
                 market_id,
                 selection_id,
                 order,
@@ -398,13 +400,7 @@ class Mean120Regression(BaseStrategy):
 
             # TODO ensure this is correct
             if self.green_enabled:
-                selection_id_ = tracker[market_id][selection_id][3]
-                handicap_ = tracker[market_id][selection_id][4]
-                market_id_ = tracker[market_id][selection_id][2]
-
-                self._green_up(
-                    market, side, order, market_id_, selection_id_, handicap_
-                )
+                self._green_up(market, side, order, tracker, market_id, selection_id)
                 self.metrics["green_margin"] += margin
 
             self._update_metrics(
@@ -417,9 +413,9 @@ class Mean120Regression(BaseStrategy):
         market: Market,
         side: str,
         order: BaseOrder,
+        tracker: dict,
         market_id: str,
         selection_id: str,
-        handicap: float,
     ) -> None:
         """
         Greens up a matched bet by placing an opposing bet.
@@ -428,17 +424,20 @@ class Mean120Regression(BaseStrategy):
             market (Market): The market object.
             side (str): The side of the bet ("BACK" or "LAY").
             order (BaseOrder): The matched order.
-            market_id (str): The market ID.
-            selection_id (str): The selection ID.
-            handicap (float): The handicap.
+            tracker (dict): The tracker containing the orders for the side and market.
+            market_id (str): The ID of the market.
+            selection_id (str): The ID of the selection.
 
         Returns:
             None
         """
+        selection_id_ = tracker[market_id][selection_id][3]
+        handicap_ = tracker[market_id][selection_id][4]
+        market_id_ = tracker[market_id][selection_id][2]
         trade = Trade(
-            market_id=market_id,
-            selection_id=selection_id,
-            handicap=handicap,
+            market_id=market_id_,
+            selection_id=selection_id_,
+            handicap=handicap_,
             strategy=self,
         )
         opposite_side = "LAY" if side == "BACK" else "BACK"
