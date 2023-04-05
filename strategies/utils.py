@@ -11,6 +11,7 @@ from onedrive import Onedrive
 from strategies.bayesian_regression_strategy import BayesianRegressionStrategy
 from strategies.mean_120_regression import Mean120Regression
 from strategies.mean_120_regression_green_up import Mean120RegressionGreenUp
+from strategies.rl_strategy import RLStrategy
 from utils.utils import train_test_model
 from strategies.bayesian_regression_strategy import (
     BayesianRegressionStrategy,
@@ -72,6 +73,46 @@ def get_strategy(
             max_live_trade_count=100000,
             max_order_exposure=10000,
             max_selection_exposure=100000,
+        )
+    if strategy == "RLStrategy":
+        model, clm, scaler = train_test_model(
+            ticks_df,
+            onedrive,
+            model_name=model_name,
+        )
+        strategy_pick = RLStrategy(
+            model=model,
+            ticks_df=ticks_df,
+            clm=clm,
+            scaler=scaler,
+            balance=balance,
+            test_analysis_df=test_analysis_df,
+            market_filter={"markets": market_file},
+            max_trade_count=100000,
+            max_live_trade_count=100000,
+            max_order_exposure=10000,
+            max_selection_exposure=100000,
+        )
+
+    if strategy == "RLStrategyGreen":
+        model, clm, scaler = train_test_model(
+            ticks_df,
+            onedrive,
+            model_name=model_name,
+        )
+        strategy_pick = RLStrategy(
+            model=model,
+            ticks_df=ticks_df,
+            clm=clm,
+            scaler=scaler,
+            balance=balance,
+            test_analysis_df=test_analysis_df,
+            market_filter={"markets": market_file},
+            max_trade_count=100000,
+            max_live_trade_count=100000,
+            max_order_exposure=10000,
+            max_selection_exposure=100000,
+            green_enabled=True,
         )
 
     # TODO Implement Balance

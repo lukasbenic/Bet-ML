@@ -90,6 +90,7 @@ def piped_run(
         )
         metrics = run(strategy, framework)
         update_tracker(tracker, metrics)
+        # NOTE it shows balance from previous run???
         tracker["balance"] = strategy.balance
 
     if save:
