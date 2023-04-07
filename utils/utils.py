@@ -34,7 +34,7 @@ from optuna.samplers import TPESampler
 from ensemble_regressor import EnsembleRegressor
 
 from onedrive import Onedrive
-from utils.constants import regression_models
+from utils.constants import KELLY_PERCENT, regression_models
 
 
 def objective(trial, x_train_df, y_train_df, model_name):
@@ -228,11 +228,6 @@ def process_run_results(results: dict, tracker: dict):
         print("")
 
     tracker["race_counter"] += 1
-
-
-# def rms(y, y_pred):
-#     rms = np.sqrt(np.mean((y - y_pred) ** 2))
-#     return rms
 
 
 def get_simulation_plot(
@@ -650,3 +645,81 @@ def get_train_data(x_train_path, y_train_path, onedrive, ticks_df, regression):
         x_train_df = x_train_df.drop(["bsps_temp"], axis=1)
 
     return x_train_df, y_train_df, mean120_train_df
+
+
+def calculate_kelly_stake(balance: float, odds: float) -> float:
+    """
+    Calculates the stake using the Kelly staking method with a fixed k% of 3%.
+
+    Args:
+        balance (float): The current bank size.
+        odds (float): The decimal odds of the selection.
+
+    Returns:
+        float: The stake size.
+    """
+    kelly_stake = (balance * KELLY_PERCENT * (odds - 1)) / (odds - 1)
+    return round(kelly_stake, 2)
+
+
+def calculate_odds(
+    predicted_bsp: float,
+    confidence_price: float,
+    mean120: float,
+    alpha: float = 0.5,
+    beta: float = 0.3,
+) -> float:
+    """
+    Calculates the odds using a weighted average of the predicted BSP, confidence price, and mean120.
+
+    Args:
+        predicted_bsp (float): The predicted BSP for the runner.
+        confidence_price (float): The confidence price for the runner.
+        mean120 (float): The mean120 for the runner.
+        alpha (float, optional): The weight to assign to the predicted BSP. Defaults to 0.5.
+        beta (float, optional): The weight to assign to the weighted average of the confidence price and mean120. Defaults to 0.3.
+
+    Returns:
+        float: The calculated odds for the runner.
+    """
+    odds = alpha * predicted_bsp + (1 - alpha) * (
+        beta * confidence_price + (1 - beta) * mean120
+    )
+    return odds
+
+
+def calculate_gambled(side: str, size_matched: float, price: float) -> float:
+    """
+    Calculates the amount gambled based on the side, size matched and price.
+
+    Args:
+        side (str): The side of the bet ("BACK" or "LAY").
+        size_matched (float): The size matched of the order.
+        price (float): The price of the order.
+
+    Returns:
+        float: The green amount gambled.
+    """
+    if side == "BACK":
+        return size_matched
+    else:
+        return size_matched * (price - 1)
+
+
+def calculate_margin(side: str, size: float, price: float, bsp_value: float) -> float:
+    """
+    Calculates the margin of the bet based on the side, size, price and BSP value.
+
+    Args:
+        side (str): The side of the bet ("BACK" or "LAY").
+        size (float): The size of the order.
+        price (float): The price of the order.
+        bsp_value (float): The BSP value.
+
+    Returns:
+        float: The margin of the bet.
+    """
+    if side == "BACK":
+        return size * (price - bsp_value) / price
+    else:
+        return size * (bsp_value - price) / price

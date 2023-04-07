@@ -31,7 +31,8 @@ def piped_run(
     test_folder_path: str,
     bsps_path: str,
     model_name: str,
-    races,
+    races: int,
+    balance: float,
     save=False,
     log_lvl=logging.CRITICAL,
 ):
@@ -77,7 +78,7 @@ def piped_run(
         "total_q_correct": 0,
         "total_q_incorrect": 0,
         "total_q_margin": 0,
-        "balance": 10000.00,
+        "balance": balance,
     }
     for market_file in market_files[0:races]:
         framework = FlumineSimulation(client=SimulatedClient())

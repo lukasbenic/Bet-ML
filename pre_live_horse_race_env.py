@@ -7,8 +7,13 @@ import torch
 from RL.TensorBoardCallback import TensorBoardRewardLogger
 from onedrive import Onedrive
 from stable_baselines3.common.vec_env import DummyVecEnv
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, DDPG
 from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
+from utils.utils import (
+    calculate_kelly_stake,
+    calculate_margin,
+    calculate_odds,
+)
 from utils.config import app_principal, SITE_URL
 from pandas import DataFrame
 from stable_baselines3.common.monitor import Monitor
@@ -28,6 +33,7 @@ class PreLiveHorseRaceEnv(gym.Env):
     def __init__(self, obs_df: DataFrame, target_df: DataFrame):
         super(PreLiveHorseRaceEnv, self).__init__()
         self.obs_df = obs_df
+        self.balance = 100000.00
         self.target_df = target_df
         self.current_step = 0
         self.action_space = Discrete(len(Actions))
@@ -39,6 +45,12 @@ class PreLiveHorseRaceEnv(gym.Env):
         )
 
     def step(self, action):
+        # NOTE - this might not be necessary
+        if isinstance(action, np.ndarray) and action.size == 1:
+            action = action.item()
+        elif isinstance(action, list) and len(action) == 1:
+            action = action[0]
+
         reward = 0
         state = self.obs_df.iloc[self.current_step]
         target = self.target_df.iloc[self.current_step]
@@ -46,20 +58,31 @@ class PreLiveHorseRaceEnv(gym.Env):
         target_value = target["bsps_temp"]
         mean_120 = state["mean_120"]
 
+        predicted_odds = calculate_odds(target_value, target_value, mean_120)
+        stake = calculate_kelly_stake(self.balance, predicted_odds)
+
         if action == Actions.BACK.value:
-            if target_value > mean_120:
-                reward = (target_value - mean_120) * 0.95  # remove 5% for commission
-            else:
-                reward = -20
+            margin = calculate_margin("BACK", stake, predicted_odds, target_value)
+            reward = (
+                margin * 0.95 if margin > 0 else margin
+            )  # remove 5% for commission onn profit
         elif action == Actions.LAY.value:
-            if target_value <= mean_120:
-                reward = (mean_120 - target_value) * 0.95  # remove 5% for commission
-            else:
-                reward = -10
+            margin = calculate_margin("LAY", stake, predicted_odds, target_value)
+            reward = (
+                margin * 0.95 if margin > 0 else margin
+            )  # remove 5% for commission on profit
+
         self.current_step += 1
+        self.balance += reward  # update for accurate kelly_stake
         done = self.current_step >= self.obs_df.shape[0]
         next_state = None if done else self.obs_df.iloc[self.current_step].values
-        info = {}
+        info = {
+            "predicted_odds": predicted_odds,
+            "stake": stake,
+            "margin": margin,
+            "balance": self.balance,
+            "step": self.current_step,
+        }
 
         return next_state, reward, done, info
 
@@ -74,12 +97,21 @@ class PreLiveHorseRaceEnv(gym.Env):
         pass
 
 
-def train_model(env: PreLiveHorseRaceEnv, save=False):
+def create_model(model_name: str, env, device, net_arch):
+    # policy_kwargs = dict(net_arch=[64, 64])  # Smaller network architecture
     policy_kwargs = dict(
-        net_arch=[64, 64],  # Smaller network architecture
+        net_arch=net_arch,
     )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = PPO(
+
+    model_class = {
+        "ppo": PPO,
+        "ddpg": DDPG,
+    }.get(model_name.lower())
+
+    if model_class is None:
+        raise ValueError(f"Unsupported model: {model_name}")
+
+    model = model_class(
         "MlpPolicy",
         env,
         verbose=1,
@@ -89,44 +121,42 @@ def train_model(env: PreLiveHorseRaceEnv, save=False):
         seed=42,
         device=device,
     )
-    # Create the EvalCallback with TensorBoard logging enabled
-    log_path = "RL/logs/"
-    eval_env = Monitor(
-        env
-    )  # You can use the same environment for evaluation, or create a new one if needed
-    eval_callback = EvalCallback(
-        eval_env, log_path=log_path, eval_freq=1000, deterministic=True, render=False
-    )
-    checkpoint_callback = CheckpointCallback(
-        save_freq=5000, save_path="./logs/", name_prefix="rl_model"
-    )
-    tensorboard_callback = TensorBoardRewardLogger("RL/tensorboard/")
-
-    model.learn(
-        total_timesteps=25000,
-        callback=[eval_callback, checkpoint_callback, tensorboard_callback],
-    )
-
-    if save:
-        model.save("RL/ppo_pre_horse_race")
 
     return model
 
 
-def test_model(env, model=None, model_path="RL/ppo_pre_horse_race"):
-    if not model:
-        model = PPO.load(model_path)
+def train_model(
+    env: PreLiveHorseRaceEnv,
+    model_name: str,
+    save=False,
+    callbacks=True,
+    net_arch=dict(pi=[64, 64], vf=[64, 64]),
+):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = create_model(model_name, env, device, net_arch)
 
-    obs = env.reset()
-    done = False
-    while not done:
-        action, _states = model.predict(obs)
-        obs, rewards, done, info = env.step(action)
-        print("action", action, "_states", _states, "reward", rewards, "done", done)
+    if callbacks:
+        eval_callback = EvalCallback(
+            Monitor(env),
+            log_path=f"RL/{model_name}/logs/",
+            eval_freq=1000,
+            deterministic=True,
+            render=False,
+        )
+        checkpoint_callback = CheckpointCallback(
+            save_freq=5000, save_path=f"RL/{model_name}/logs/", name_prefix="model"
+        )
+        tensorboard_callback = TensorBoardRewardLogger(f"RL/{model_name}/tensorboard/")
 
-        env.render()
+        model.learn(
+            total_timesteps=25000,
+            callback=[eval_callback, checkpoint_callback, tensorboard_callback],
+        )
+    else:
+        model.learn(total_timesteps=25000)
 
-    env.close()
+    if save:
+        model.save(f"RL/{model_name}/{model_name}_model")
 
 
 if __name__ == "__main__":
@@ -147,8 +177,13 @@ if __name__ == "__main__":
         ticks_df,
         regression=True,
     )
-    # print("target_df shape", target_df.shape)
-    # print("obs_df shape", obs_df.shape)
-    env = DummyVecEnv([lambda: PreLiveHorseRaceEnv(obs_df, target_df)])
-    model = train_model(env, save=False)
-    # test_model(env, model=model)
+    # env = DummyVecEnv([lambda: PreLiveHorseRaceEnv(obs_df, target_df)])
+
+    env = PreLiveHorseRaceEnv(obs_df, target_df)
+    # lstm_net_arch = dict(pi=[64, 64, ("lstm", 64)], vf=[64, 64, ("lstm", 64)])
+    small_net_arch = dict(pi=[32, 32], vf=[32, 32])
+    train_model(
+        env, save=True, model_name="PPO", callbacks=False, net_arch=small_net_arch
+    )
+    # model = PPO.load("RL/PPO/PPO_model")
+    # print("policy", model.policy)

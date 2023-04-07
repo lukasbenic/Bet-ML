@@ -10,7 +10,6 @@ from deep_learning.bayesian_regression import (
 from onedrive import Onedrive
 from strategies.bayesian_regression_strategy import BayesianRegressionStrategy
 from strategies.mean_120_regression import Mean120Regression
-from strategies.mean_120_regression_green_up import Mean120RegressionGreenUp
 from strategies.rl_strategy import RLStrategy
 from utils.utils import train_test_model
 from strategies.bayesian_regression_strategy import (
