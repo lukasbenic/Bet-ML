@@ -1,5 +1,6 @@
 import copy
 from collections import deque
+from typing import Any, Dict, Tuple, Union
 import joblib
 import numpy as np
 import os
@@ -7,15 +8,29 @@ from pprint import pprint
 import pandas as pd
 from matplotlib import pyplot as plt
 import seaborn as sns
+import sklearn
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.kernel_approximation import RBFSampler
 from sklearn.neighbors import KNeighborsRegressor
+from sklearn.tree import DecisionTreeRegressor
 import torch
+from xgboost import XGBRegressor
 import yaml
+from sklearn.gaussian_process.kernels import (
+    RBF,
+    Matern,
+    RationalQuadratic,
+    ExpSineSquared,
+    DotProduct,
+)
+
 
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.linear_model import (
     BayesianRidge,
     ElasticNet,
     Lasso,
+    LinearRegression,
     Ridge,
 )
 from sklearn.svm import SVR
@@ -26,10 +41,11 @@ from sklearn.metrics import (
     mean_squared_error as mse,
     r2_score,
 )
-from sklearn.model_selection import GridSearchCV, cross_val_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV, KFold, cross_val_score
+from sklearn.preprocessing import RobustScaler, StandardScaler, MinMaxScaler
 
 import optuna
+from optuna.trial import Trial
 from optuna.samplers import TPESampler
 from ensemble_regressor import EnsembleRegressor
 
@@ -37,20 +53,53 @@ from onedrive import Onedrive
 from utils.constants import KELLY_PERCENT, regression_models
 
 
-def objective(trial, x_train_df, y_train_df, model_name):
+def objective(
+    trial: Trial,
+    X: pd.DataFrame,
+    y: pd.DataFrame,
+    model_name: str,
+    metric: str = "r2",
+) -> float:
+    """
+    Optuna objective function for hyperparameter optimization of various regression models.
+
+    :param trial: Optuna trial object for the optimization process
+    :param X: DataFrame containing the training features
+    :param y: DataFrame containing the training target variable
+    :param model_name: String representing the name of the model to be optimized
+    :param metric: String representing the evaluation metric to be optimized (default: 'neg_mean_squared_error')
+    :return: Mean cross-validated score of the model based on the selected metric
+    """
     if model_name == "Ridge":
-        alpha = trial.suggest_float("alpha", 1e-5, 1e2)
+        alpha = trial.suggest_float("alpha", 0.001, 100, log=True)
         model = Ridge(alpha=alpha)
+    elif model_name == "XGBRegressor":
+        learning_rate = trial.suggest_float("learning_rate", 0.001, 1.0, log=True)
+        max_depth = trial.suggest_int("max_depth", 1, 10)
+        n_estimators = trial.suggest_int("n_estimators", 50, 200)
+        gamma = trial.suggest_float("gamma", 0.0, 1.0)
+        subsample = trial.suggest_float("subsample", 0.5, 1.0)
+        colsample_bytree = trial.suggest_float("colsample_bytree", 0.5, 1.0)
+        model = XGBRegressor(
+            learning_rate=learning_rate,
+            max_depth=max_depth,
+            n_estimators=n_estimators,
+            gamma=gamma,
+            subsample=subsample,
+            colsample_bytree=colsample_bytree,
+            random_state=42,
+            objective="reg:squarederror",
+        )
     elif model_name == "KNeighborsRegressor":
-        n_neighbors = trial.suggest_int("n_neighbors", 1, 20)
+        n_neighbors = trial.suggest_int("n_neighbors", 1, 50)
         weights = trial.suggest_categorical("weights", ["uniform", "distance"])
         p = trial.suggest_int("p", 1, 2)
         model = KNeighborsRegressor(n_neighbors=n_neighbors, weights=weights, p=p)
     elif model_name == "Lasso":
-        alpha = trial.suggest_float("alpha", 1e-5, 1e2)
+        alpha = trial.suggest_float("alpha", 0.001, 100, log=True)
         model = Lasso(alpha=alpha)
     elif model_name == "ElasticNet":
-        alpha = trial.suggest_float("alpha", 1e-5, 1e2)
+        alpha = trial.suggest_float("alpha", 0.001, 100, log=True)
         l1_ratio = trial.suggest_float("l1_ratio", 0, 1)
         model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio)
     elif model_name == "BayesianRidge":
@@ -62,44 +111,138 @@ def objective(trial, x_train_df, y_train_df, model_name):
             alpha_1=alpha_1, alpha_2=alpha_2, lambda_1=lambda_1, lambda_2=lambda_2
         )
     elif model_name == "RandomForestRegressor":
-        n_estimators = trial.suggest_int("n_estimators", 10, 200)
-        max_depth = trial.suggest_int("max_depth", 2, 32, log=True)
-        model = RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth)
+        n_estimators = trial.suggest_int("n_estimators", 100, 2000)
+        max_depth = trial.suggest_int("max_depth", 5, 50, log=True)
+        min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
+        min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
+        max_features = trial.suggest_int("max_features", 1, len(X.columns))
+        model = RandomForestRegressor(
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            min_samples_split=min_samples_split,
+            min_samples_leaf=min_samples_leaf,
+            max_features=max_features,
+        )
     elif model_name == "GradientBoostingRegressor":
-        n_estimators = trial.suggest_int("n_estimators", 10, 200)
-        learning_rate = trial.suggest_float("learning_rate", 1e-4, 1e-1)
-        max_depth = trial.suggest_int("max_depth", 2, 32, log=True)
+        n_estimators = trial.suggest_int("n_estimators", 50, 1000)
+        learning_rate = trial.suggest_float("learning_rate", 0.001, 0.2, log=True)
+        max_depth = trial.suggest_int("max_depth", 3, 20)
+        min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
+        min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
+        max_features = trial.suggest_categorical(
+            "max_features", ["auto", "sqrt", "log2"]
+        )
         model = GradientBoostingRegressor(
-            n_estimators=n_estimators, learning_rate=learning_rate, max_depth=max_depth
+            n_estimators=n_estimators,
+            learning_rate=learning_rate,
+            max_depth=max_depth,
+            min_samples_split=min_samples_split,
+            min_samples_leaf=min_samples_leaf,
+            max_features=max_features,
+            random_state=42,
         )
     elif model_name == "SVR":
-        C = trial.suggest_float("C", 1e-4, 1e4)
-        epsilon = trial.suggest_float("epsilon", 1e-4, 1e1)
+        C = trial.suggest_float("C", 1e-3, 1e3, log=True)
+        epsilon = trial.suggest_float("epsilon", 0.001, 0.1, log=True)
         kernel = trial.suggest_categorical(
-            "kernel", ["linear", "poly", "rbf", "sigmoid"]
+            "kernel", ["linear", "rbf", "poly", "sigmoid"]
         )
-        model = SVR(C=C, epsilon=epsilon, kernel=kernel)
+        gamma = trial.suggest_categorical("gamma", ["scale", "auto"])
+        model = SVR(C=C, epsilon=epsilon, kernel=kernel, gamma=gamma)
+
+    elif model_name == "GaussianProcessRegressor":
+        kernel_type = trial.suggest_categorical(
+            "kernel",
+            ["RBF", "Matern", "RationalQuadratic", "ExpSineSquared", "DotProduct"],
+        )
+        alpha = trial.suggest_float("alpha", 1e-15, 1e-10, log=True)
+
+        if kernel_type == "RBF":
+            length_scale = trial.suggest_float("length_scale", 1e-2, 1e2, log=True)
+            kernel = RBF(length_scale=length_scale)
+        elif kernel_type == "Matern":
+            length_scale = trial.suggest_float("length_scale", 1e-2, 1e2, log=True)
+            nu = trial.suggest_float("nu", 0.5, 2.5)
+            kernel = Matern(length_scale=length_scale, nu=nu)
+        elif kernel_type == "RationalQuadratic":
+            length_scale = trial.suggest_float("length_scale", 1e-2, 1e2, log=True)
+            alpha = trial.suggest_float("alpha", 1e-2, 1e2, log=True)
+            kernel = RationalQuadratic(length_scale=length_scale, alpha=alpha)
+        elif kernel_type == "ExpSineSquared":
+            length_scale = trial.suggest_float("length_scale", 1e-2, 1e2, log=True)
+            periodicity = trial.suggest_float("periodicity", 1e-2, 1e2, log=True)
+            kernel = ExpSineSquared(length_scale=length_scale, periodicity=periodicity)
+        elif kernel_type == "DotProduct":
+            sigma_0 = trial.suggest_float("sigma_0", 1e-2, 1e2, log=True)
+            kernel = DotProduct(sigma_0=sigma_0)
+        else:
+            raise ValueError(f"Invalid kernel type '{kernel_type}'")
+
+        model = GaussianProcessRegressor(
+            kernel=kernel, alpha=alpha, n_restarts_optimizer=3
+        )
+    elif model_name == "LinearRegression":
+        # Specify hyperparameters for LinearRegression
+        fit_intercept = trial.suggest_categorical("fit_intercept", [True, False])
+
+        model = LinearRegression(fit_intercept=fit_intercept)
+
+    elif model_name == "DecisionTreeRegressor":
+        # Specify hyperparameters for DecisionTreeRegressor
+        max_depth = trial.suggest_int("max_depth", 2, 50)
+        min_samples_split = trial.suggest_int("min_samples_split", 2, 10)
+        min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 10)
+        max_features = trial.suggest_categorical(
+            "max_features", ["auto", "sqrt", "log2", None]
+        )
+
+        model = DecisionTreeRegressor(
+            max_depth=max_depth,
+            min_samples_split=min_samples_split,
+            min_samples_leaf=min_samples_leaf,
+            max_features=max_features,
+        )
     else:
         raise ValueError(f"Invalid model name '{model_name}'")
 
-    # Perform cross-validation with n_jobs=1 to avoid inefficiencies
-    scores = cross_val_score(
-        model,
-        x_train_df,
-        y_train_df,
-        cv=3,
-        scoring=make_scorer(r2_score),
-        n_jobs=1,
-    )
-    return scores.mean()
+    # Perform cross-validation with n_jobs=-1 to use all available cores
+    cv = KFold(n_splits=10, shuffle=True, random_state=42)
+
+    scores = cross_val_score(model, X, y, cv=cv, scoring=metric, n_jobs=1)
+    return np.mean(scores)
 
 
-# Train the best model using best parameters
-def create_best_model(best_params, model_name, x_train_df, y_train_df):
+def create_best_model(
+    best_params: Dict[str, Any],
+    model_name: str,
+    x_train_df: pd.DataFrame,
+    y_train_df: pd.DataFrame,
+) -> Union[
+    Ridge,
+    KNeighborsRegressor,
+    Lasso,
+    ElasticNet,
+    BayesianRidge,
+    RandomForestRegressor,
+    GradientBoostingRegressor,
+    SVR,
+    EnsembleRegressor,
+]:
+    """
+    Create and train the best model with the best parameters found by Optuna.
+
+    :param best_params: Dictionary containing the best hyperparameters for the chosen model
+    :param model_name: String representing the name of the model to be created
+    :param x_train_df: DataFrame containing the training features
+    :param y_train_df: DataFrame containing the training target variable
+    :return: Trained model with the best parameters
+    """
     if model_name == "Ridge":
         model = Ridge(**best_params)
     elif model_name == "KNeighborsRegressor":
         model = KNeighborsRegressor(**best_params)
+    elif model_name == "XGBRegressor":
+        model = XGBRegressor(**best_params)
     elif model_name == "Lasso":
         model = Lasso(**best_params)
     elif model_name == "ElasticNet":
@@ -112,15 +255,21 @@ def create_best_model(best_params, model_name, x_train_df, y_train_df):
         model = GradientBoostingRegressor(**best_params)
     elif model_name == "SVR":
         model = SVR(**best_params)
+    elif model_name == "GaussianProcessRegressor":
+        model = GaussianProcessRegressor(**best_params)
+    elif model_name == "LinearRegression":
+        model = LinearRegression(**best_params)
+    elif model_name == "DecisionTreeRegressor":
+        model = DecisionTreeRegressor(**best_params)
     elif model_name == "Ensemble":
         model_files = os.listdir("models")
         ensemble_models = [
             joblib.load(f"models/{model}")
-            for model in model_files
+            for model in model_files[1:]
             if len(model.split("_")) == 1
         ]
         print("Models used for Ensemble")
-        [print(model) for model in model_files if len(model.split("_")) == 1]
+        [print(model) for model in model_files[1:] if len(model.split("_")) == 1]
         model = EnsembleRegressor(ensemble_models)
     else:
         raise ValueError(f"Invalid model name '{model_name}'")
@@ -130,7 +279,17 @@ def create_best_model(best_params, model_name, x_train_df, y_train_df):
     return model
 
 
-def rms(y_pred, y):
+def rms(y_pred: np.ndarray, y: np.ndarray) -> float:
+    """
+    Calculate the Root Mean Squared Error (RMSE) between the predicted values and the actual values.
+
+    Args:
+        y_pred (np.ndarray): The predicted values.
+        y (np.ndarray): The actual values.
+
+    Returns:
+        float: The Root Mean Squared Error (RMSE) value.
+    """
     rms = np.sqrt(np.mean((y - y_pred) ** 2))
     return rms
 
@@ -268,18 +427,36 @@ def train_test_model(
     ticks_df: pd.DataFrame,
     onedrive: Onedrive,
     model_name: str,
-    regression=True,
-    save=True,
-    x_train_path="utils/x_train_df.csv",
-    y_train_path="utils/y_train_df.csv",
-    model_path="models/",
-):
+    regression: bool = True,
+    save: bool = True,
+    x_train_path: str = "utils/x_train_df.csv",
+    y_train_path: str = "utils/y_train_df.csv",
+    model_path: str = "models/",
+) -> Tuple[Any, Any, Any]:
+    """
+    Train and test the specified model, and save the results if specified.
+
+    Args:
+        ticks_df (pd.DataFrame): The ticks DataFrame used for normalization.
+        onedrive (Onedrive): The Onedrive object for loading data.
+        model_name (str): The name of the model to train and test.
+        regression (bool, optional): Whether the model is a regression model. Defaults to True.
+        save (bool, optional): Whether to save the results. Defaults to True.
+        x_train_path (str, optional): Path to the saved x_train DataFrame. Defaults to "utils/x_train_df.csv".
+        y_train_path (str, optional): Path to the saved y_train DataFrame. Defaults to "utils/y_train_df.csv".
+        model_path (str, optional): Path to the saved model. Defaults to "models/".
+
+    Returns:
+        Tuple[Any, Any, Any]: The trained model, column names, and scaler used for feature scaling.
+    """
     x_train_df, y_train_df, mean120_train_df = get_train_data(
         x_train_path, y_train_path, onedrive, ticks_df, regression
     )
-
+    pd.set_option('display.width', 1000)
     clm = x_train_df.columns
-    scaler = StandardScaler()
+    print("columns", clm)
+    # scaler = StandardScaler()
+    scaler = MinMaxScaler()
 
     x_train_df = pd.DataFrame(scaler.fit_transform(x_train_df), columns=clm)
     y_train_df = y_train_df.values.ravel()
@@ -312,20 +489,20 @@ def train_test_model(
 
     best_params = None
     if not model_name == "Ensemble":
-        n_trials = (
-            5
-            if model_name
-            in [
-                "RandomForestRegressor",
-                "KNeighborsRegressor",
-                "GradientBoostingRegressor",
-                "SVR",
-            ]
-            else 200
-        )
-        print(y_train_df)
+        n_trials = 300
+        if model_name in [
+            "GradientBoostingRegressor",
+            "GaussianProcessRegressor",
+            "SVR",
+            "XGBRegressor",
+        ]:
+            n_trials = 10
+        elif model_name == "KNeighborsRegressor":
+            n_trials = 30
+
         # Create Optuna study and optimize hyperparameters
         study = optuna.create_study(sampler=TPESampler(seed=42), direction="maximize")
+        print("scorers", sorted(sklearn.metrics.SCORERS.keys()))
         study.optimize(
             lambda trial: objective(trial, x_train_df, y_train_df, model_name),
             n_trials=n_trials,
@@ -353,23 +530,42 @@ def train_test_model(
     )
 
     if save:
-        with open(f"{model_path}/{model_name}_results.yaml", "w") as f:
-            yaml.dump(metrics, f)
+        metrics_df = pd.DataFrame.from_dict(metrics)
+        metrics_df.to_csv(f"{model_path}metrics/{model_name}_metrics.csv")
 
     return best_model, clm, scaler
 
 
 def test_model(
-    ticks_df,
-    model,
-    scaler,
-    clm,
-    x_train_df,
-    y_train_df,
-    mean120_train_df,
-    test_analysis_df,
-    regression=True,
-):
+    ticks_df: pd.DataFrame,
+    model: Any,
+    scaler: Any,
+    clm: pd.Index,
+    x_train_df: pd.DataFrame,
+    y_train_df: pd.DataFrame,
+    mean120_train_df: pd.DataFrame,
+    test_analysis_df: pd.DataFrame,
+    regression: bool = True,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Test the trained model and compute evaluation metrics.
+
+    Args:
+        ticks_df (pd.DataFrame): The ticks DataFrame used for normalization.
+        model (Any): The trained model to test.
+        scaler (Any): The scaler used for feature scaling.
+        clm (pd.Index): The column names of the transformed DataFrame.
+        x_train_df (pd.DataFrame): The training feature DataFrame.
+        y_train_df (pd.DataFrame): The training target DataFrame.
+        mean120_train_df (pd.DataFrame): The mean_120 column from the training DataFrame.
+        test_analysis_df (pd.DataFrame): The test analysis DataFrame.
+        regression (bool, optional): Whether the model is a regression model. Defaults to True.
+
+    Returns:
+        Dict[str, Dict[str, float]]: The evaluation metrics for the model.
+    """
+
+    # Filter and clean test_analysis_df
     test_analysis_df = test_analysis_df.dropna()
     test_analysis_df = test_analysis_df[
         (test_analysis_df["mean_120"] <= 50) & (test_analysis_df["mean_120"] > 1.1)
@@ -380,12 +576,10 @@ def test_model(
         test_analysis_df[test_analysis_df["std_2700"] > 1].index
     )
 
-    test_analysis_df_y = pd.DataFrame().assign(
-        market_id=test_analysis_df["market_id"],
-        selection_ids=test_analysis_df["selection_ids"],
-        bsps=test_analysis_df["bsps"],
-    )
-    # Sort out our test the same as before.
+    # Prepare test_analysis_df_y
+    test_analysis_df_y = test_analysis_df[["market_id", "selection_ids", "bsps"]]
+
+    # Normalize the test DataFrame
     test_df = copy.copy(test_analysis_df)
     test_df = normalized_transform(test_df, ticks_df)
 
@@ -400,16 +594,16 @@ def test_model(
     y_test_df = copy.copy(test_df["bsps"])
     if regression:
         y_test_df = test_df["bsps_temp"]
+
     x_test_df = test_df.drop(["bsps"], axis=1)
 
     bsp_actual_test = test_df["bsps_temp"]
-    x_test_df = x_test_df.drop(["bsps_temp"], axis=1)
+    x_test_df = x_test_df.drop(
+        ["bsps_temp", "mean_120_temp"], axis=1
+    )  # TEst dropping mean120 temp
 
-    print("TEST ------")
-    print(x_test_df)
     x_test_df = pd.DataFrame(scaler.transform(x_test_df), columns=clm)
 
-    # test_analysis_df = test_analysis_df.drop(["bsps"], axis=1)
     y_pred_train = model.predict(x_train_df)
     y_pred_test = model.predict(x_test_df)
 
@@ -449,10 +643,20 @@ def test_model(
     return metrics
 
 
-def normalized_transform(train_df, ticks_df):
-    """This takes the train_df and transform it to add ratios, WoM, and then turns everything
-    into ticks and then normalizes everything"""
-    # lets now try using ticks and total average? so mean_ticks / total_mean_ticks
+def normalized_transform(
+    train_df: pd.DataFrame, ticks_df: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Normalize and transform train_df to add ratios, WoM, and then turn everything into ticks and normalize.
+
+    Args:
+        train_df (pd.DataFrame): The training DataFrame to be transformed.
+        ticks_df (pd.DataFrame): The ticks DataFrame used for normalization.
+
+    Returns:
+        pd.DataFrame: The transformed and normalized training DataFrame.
+    """
+
     train_df = train_df.dropna()
     train_df = train_df[(train_df["mean_120"] > 1.1) & (train_df["mean_120"] <= 50)]
     train_df = train_df[train_df["mean_14400"] > 0]
@@ -496,7 +700,6 @@ def normalized_transform(train_df, ticks_df):
         train_df["total_volume"] += train_df[volume_list[i]]
         train_df["sum_mean_volume"] += train_df["mean_and_volume_{}".format(timie)]
         train_df = train_df.drop(["mean_and_volume_{}".format(timie)], axis=1)
-
     train_df["total_vwap"] = train_df["sum_mean_volume"] / train_df["total_volume"]
     train_df = train_df.drop(["sum_mean_volume"], axis=1)
 
@@ -547,7 +750,7 @@ def normalized_transform(train_df, ticks_df):
         train_df["bsps"] = bsps_ticks
         train_df["bsps"] = train_df["bsps"] / train_df["total_vwap"]
     except:
-        print("BSPS not found in this df.")
+        print("No BSPS in this df.")
 
     train_df = train_df.drop(["total_volume", "total_vwap"], axis=1)
     train_df = train_df.drop(["Unnamed: 0", "selection_ids", "market_id"], axis=1)
@@ -593,7 +796,26 @@ def preprocess_test_analysis(test_analysis_df):
     return test_analysis_df, test_analysis_df_y
 
 
-def get_train_data(x_train_path, y_train_path, onedrive, ticks_df, regression):
+def get_train_data(
+    x_train_path: str,
+    y_train_path: str,
+    onedrive: Onedrive,
+    ticks_df: pd.DataFrame,
+    regression: bool,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Get the train data from the given paths or fetch and process it if not available.
+
+    Args:
+        x_train_path (str): The path to the X_train data.
+        y_train_path (str): The path to the y_train data.
+        onedrive (Onedrive): The Onedrive instance for fetching data.
+        ticks_df (pd.DataFrame): The DataFrame containing the ticks data.
+        regression (bool): If True, perform regression. If False, perform classification.
+
+    Returns:
+        Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]: Returns the X_train, y_train, and mean120_train DataFrames.
+    """
     x_train_df = (
         pd.read_csv(x_train_path, index_col=False)
         if os.path.exists(x_train_path)
@@ -616,6 +838,8 @@ def get_train_data(x_train_path, y_train_path, onedrive, ticks_df, regression):
         print("Finished train data normalization...")
 
         mean120_actual_train = train_df["mean_120_temp"]
+
+        # NOTE might want to drop this for regression too
         if not regression:
             train_df = train_df.drop(["mean_120_temp"], axis=1)
 
@@ -627,9 +851,7 @@ def get_train_data(x_train_path, y_train_path, onedrive, ticks_df, regression):
         df_minority = train_df[(train_df["bsps"] == 1)]
 
         # downsample majority
-        df_majority = df_majority.head(
-            len(df_minority)
-        )  # because I don't trust the resample
+        df_majority = df_majority.head(len(df_minority))
 
         # Combine majority class with upsampled minority class
         train_df = pd.concat([df_minority, df_majority])
@@ -644,7 +866,48 @@ def get_train_data(x_train_path, y_train_path, onedrive, ticks_df, regression):
         x_train_df = train_df.drop(["bsps"], axis=1)
         x_train_df = x_train_df.drop(["bsps_temp"], axis=1)
 
+    # NOTE test
+    x_train_df = x_train_df.drop(["mean_120_temp"], axis=1)
     return x_train_df, y_train_df, mean120_train_df
+
+
+def visualize_data(onedrive) -> None:
+    """
+    Visualize the training data using histograms, box plots, and density plots.
+
+    Args:
+        X_train (pd.DataFrame): The DataFrame containing the training features.
+        y_train (pd.DataFrame): The DataFrame containing the training target variable.
+    """
+    # Combine X_train and y_train for visualization
+    ticks_df = onedrive.get_folder_contents(
+        target_folder="ticks", target_file="ticks.csv"
+    )
+    x_train_df, y_train_df, _ = get_train_data(
+        "utils/x_train_df.csv", "utils/y_train_df.csv", onedrive, ticks_df, True
+    )
+    train_df = pd.concat([x_train_df, y_train_df], axis=1)
+
+    # Calculate correlation matrix
+    corr_matrix = train_df.corr()
+
+    # Visualize heatmap
+    plt.figure(figsize=(20, 20))
+    sns.heatmap(corr_matrix, cmap="coolwarm", fmt=".2f")
+    plt.title("Correlation Matrix Heatmap")
+    plt.show()
+
+
+def calculate_stake(stake: float, price_adjusted: float, side: str) -> float:
+    stake = (
+        round(
+            stake / (price_adjusted - 1),
+            2,
+        )
+        if side == "LAY"
+        else stake
+    )
+    return stake
 
 
 def calculate_kelly_stake(balance: float, odds: float) -> float:

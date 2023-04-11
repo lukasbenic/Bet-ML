@@ -12,7 +12,6 @@ from flumine.order.order import (
 )
 from flumine.markets.market import Market
 from betfairlightweight.resources import MarketBook, RunnerBook
-from sklearn.preprocessing import StandardScaler
 from stable_baselines3 import PPO
 from pre_live_horse_race_env import Actions
 from utils.constants import KELLY_PERCENT, TIME_BEFORE_START
@@ -21,6 +20,7 @@ from utils.utils import (
     calculate_kelly_stake,
     calculate_margin,
     calculate_odds,
+    calculate_stake,
     normalized_transform,
     preprocess_test_analysis,
 )
@@ -29,20 +29,16 @@ from utils.utils import (
 class RLStrategy(BaseStrategy):
     def __init__(
         self,
-        scaler: StandardScaler,
         ticks_df: pd.DataFrame,
         test_analysis_df: pd.DataFrame,
-        balance,
-        model,
-        clm,
+        balance: float,
+        rl_agent: PPO,
         green_enabled=False,
         *args,
         **kwargs,
     ):
-        self.scaler = scaler
         self.ticks_df = ticks_df
-        self.model = model
-        self.clm = clm
+        self.rl_agent = rl_agent
         self._set_and_preprocess_test_analysis(test_analysis_df)
         self.metrics = {
             "profit": 0,
@@ -72,14 +68,11 @@ class RLStrategy(BaseStrategy):
         # self.stake = 50
         self.first_nonrunners = True
         self.runner_number = None
-        self.rl_agent = PPO.load("RL/PPO/PPO_model")
 
         super_kwargs = kwargs.copy()
-        super_kwargs.pop("scaler", None)
         super_kwargs.pop("ticks_df", None)
         super_kwargs.pop("test_analysis_df", None)
-        super_kwargs.pop("model", None)
-        super_kwargs.pop("clm", None)
+        super_kwargs.pop("rl_agent", None)
         super_kwargs.pop("balance", None)
         super_kwargs.pop("green_enabled", None)
         super().__init__(*args, **super_kwargs)
@@ -185,7 +178,7 @@ class RLStrategy(BaseStrategy):
         self._set_market_id_bet_trackers(market_id)
 
         if not (
-            self.seconds_to_start > 100
+            self.seconds_to_start > 110
             and self.seconds_to_start < 120
             # and market_book.inplay  # maybe keep this
         ):
@@ -196,84 +189,42 @@ class RLStrategy(BaseStrategy):
                 continue
             (
                 action,
-                runner_predicted_bsp,
                 mean_120,
-            ) = self.get_model_prediction_and_mean_120(runner, market_id)
+            ) = self._get_action_mean_120(runner, market_id)
 
             print("action", action)
-            if not mean_120 or not runner_predicted_bsp:
+            if mean_120 is None or action is None:
+                print(f"no mean120 {mean_120} or action {action}")
                 continue
 
-            (
-                back_price_adjusted,
-                back_confidence_price,
-                back_bsp_value,
-            ) = self._get_adjusted_prices(
-                market_id=market_id, runner=runner, mean_120=mean_120, side="BACK"
-            )
-
-            (
-                lay_price_adjusted,
-                lay_confidence_price,
-                lay_bsp_value,
-            ) = self._get_adjusted_prices(
-                market_id=market_id, runner=runner, mean_120=mean_120, side="LAY"
-            )
-
-            # print("PRICES ADJUSTED", back_price_adjusted, lay_price_adjusted)
-            # print("CONFIDENCE PRICES", back_confidence_price, lay_confidence_price)
-            # print("BSPS", back_bsp_value, lay_bsp_value)
-            # print("MEAN120", mean_120)
-
-            # here is action back
             if (
-                runner_predicted_bsp < back_confidence_price
-                and mean_120 <= 50
-                and mean_120 > 1.1
+                mean_120 > 1.1
                 and runner.selection_id not in self.back_bet_tracker[market_id].keys()
                 and action == Actions.BACK.value
             ):
-                print(
-                    "predicted",
-                    runner_predicted_bsp,
-                    "confidence",
-                    back_confidence_price,
-                )
+                print("about to back")
+
                 self._create_order(
                     market_id,
                     runner,
-                    back_confidence_price,
                     mean_120,
-                    back_price_adjusted,
-                    back_bsp_value,
                     market,
-                    side="BACK",
+                    "BACK",
                 )
 
-            # here is action lay
             if (
-                runner_predicted_bsp > lay_confidence_price
-                # and lay_price_adjusted <= self.stake
-                and lay_price_adjusted > 1.1
+                mean_120 > 1.1
                 and runner.selection_id not in self.lay_bet_tracker[market_id].keys()
                 and action == Actions.LAY.value
             ):
-                print(
-                    "predicted",
-                    runner_predicted_bsp,
-                    "confidence",
-                    lay_confidence_price,
-                )
+                print("about to lay")
 
                 self._create_order(
                     market_id,
                     runner,
-                    lay_confidence_price,
                     mean_120,
-                    lay_price_adjusted,
-                    lay_bsp_value,
                     market,
-                    side="LAY",
+                    "LAY",
                 )
 
     def process_orders(self, market: Market, orders: list) -> None:
@@ -531,31 +482,23 @@ class RLStrategy(BaseStrategy):
         self,
         market_id: float,
         runner: RunnerBook,
-        confidence_price,
         mean_120,
-        price_adjusted,
-        bsp_value: float,
         market: Market,
         side: str,
     ):
-        """Creates and places an order on the specified market with the specified parameters.
+        (
+            price_adjusted,
+            confidence_price,
+            bsp_value,
+        ) = self._get_adjusted_prices(
+            market_id=market_id, runner=runner, mean_120=mean_120, side=side
+        )
 
-        Args:
-            market_id (float): The ID of the market to place the order on.
-            runner (RunnerBook): The runner on which to place the order.
-            price_adjusted (numpy.float64): The adjusted price for the order.
-            bsp_value (numpy.float64): The Betfair Starting Price value for the runner.
-            market (Market): The Betfair market on which to place the order.
-            side (str): The side of the market to place the order on, either 'BACK' or 'LAY'.
-
-        Returns:
-            None.
-
-        """
         tracker = self._get_tracker(side)
         matched_tracker = self._get_matched_tracker(side)
         tracker[market_id].setdefault(runner.selection_id, {})
         matched_tracker[market_id].setdefault(runner.selection_id, {})
+
         trade = Trade(
             market_id=str(market_id),
             selection_id=runner.selection_id,
@@ -566,8 +509,14 @@ class RLStrategy(BaseStrategy):
         is_price_above_bsp = price_adjusted > bsp_value
         self.metrics["q_correct" if is_price_above_bsp else "q_incorrect"] += 1
 
-        odds = calculate_odds(bsp_value, confidence_price, mean_120)
-        stake = calculate_kelly_stake(balance=self.balance, odds=odds)
+        # Kelly Stake
+        # odds = calculate_odds(bsp_value, confidence_price, mean_120)
+        # stake = calculate_kelly_stake(balance=self.balance, odds=odds)
+
+        # Fixed Stake
+        stake = calculate_stake(50.00, price_adjusted, side)
+        print("stake", stake, "price adjs", price_adjusted)
+
         order = trade.create_order(
             side=side,
             order_type=LimitOrder(
@@ -576,9 +525,8 @@ class RLStrategy(BaseStrategy):
                 persistence_type="LAPSE",
             ),
         )
-
         print(
-            f"{side} order created at {self.seconds_to_start}: \n\tmarket id {market_id} \n\tmarket {market} \n\trunner {runner} \n\tprice adjusted {price_adjusted} \n\tbsp_value {bsp_value} \n\tOrder size: {stake} \n\tOdds: {odds}"
+            f"{side} order created at {self.seconds_to_start}: \n\tmarket id {market_id} \n\tmarket {market} \n\trunner {runner} \n\tprice adjusted {price_adjusted} \n\tbsp_value {bsp_value} \n\tOrder size: {stake}"
         )
 
         # Get trackers based on order side
@@ -663,7 +611,7 @@ class RLStrategy(BaseStrategy):
             else self.matched_lay_bet_tracker
         )
 
-    def get_model_prediction_and_mean_120(
+    def _get_action_mean_120(
         self, runner: RunnerBook, market_id: float
     ) -> Tuple[np.float64, np.float64]:
         predict_row = self.test_analysis_df.loc[
@@ -672,11 +620,12 @@ class RLStrategy(BaseStrategy):
         ]
         mean_120 = predict_row["mean_120"].values[0]
         predict_row = normalized_transform(predict_row, self.ticks_df)
-        predict_row = predict_row.drop(["bsps_temp", "bsps"], axis=1)
-        predict_row = pd.DataFrame(self.scaler.transform(predict_row), columns=self.clm)
-        runner_predicted_bsp = self.model.predict(predict_row)
+        # print("predict_row1", predict_row)
 
+        predict_row = predict_row.drop(["bsps_temp", "bsps", "mean_120_temp"], axis=1)
+        # print("predict_row2", predict_row)
         # Reinforcement Learning Prediction
-        action, _ = self.rl_agent.predict(predict_row)
+        action, _ = self.rl_agent.predict(predict_row.to_numpy())
+        action = action[0] if isinstance(action, np.ndarray) else action
 
-        return action, runner_predicted_bsp, mean_120
+        return action, mean_120

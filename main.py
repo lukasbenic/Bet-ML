@@ -1,13 +1,13 @@
 from pprint import pprint
 
 import yaml
-
 from onedrive import Onedrive
-from flumine import clients
 from flumine_simulator import piped_run
 from matplotlib import pyplot as plt
 from utils.config import app_principal, SITE_URL
 import argparse
+
+from utils.utils import visualize_data
 
 
 plt.rcParams["figure.figsize"] = (20, 3)
@@ -35,35 +35,43 @@ if __name__ == "__main__":
         default="Mean120Regression",
         help="Name of the strategy to use",
     )
+
+    # Lassso is ok
     parser.add_argument(
         "--model_name",
         type=str,
-        default="Ensemble",
+        default="Ridge",
         help="Name of the model to use",
     )
-    args = parser.parse_args()
 
+    parser.add_argument(
+        "--balance",
+        type=float,
+        default=10000.00,
+        help="Starting balance",
+    )
+    args = parser.parse_args()
+    onedrive = Onedrive(
+        client_id=app_principal["client_id"],
+        client_secret=app_principal["client_secret"],
+        site_url=SITE_URL,
+    )
     tracker = piped_run(
         strategy_name=args.strategy_name,
-        onedrive=Onedrive(
-            client_id=app_principal["client_id"],
-            client_secret=app_principal["client_secret"],
-            site_url=SITE_URL,
-        ),
+        onedrive=onedrive,
         test_folder_path=args.test_folder_path,
         bsps_path=args.bsps_path,
         model_name=args.model_name,
         races=args.races,
         save=True,
+        balance=args.balance,
     )
 
-    # tracker = dict()
-    # with open("models/BayesianRidge_results.yaml", "r") as f:
-    #     tracker = yaml.load(f, Loader=yaml.UnsafeLoader)
-    # fig = get_simulation_plot(tracker, "Strategy1")
-    # plt.show()
-    # metrics = dict()
-    # with open("dummy_data/metrics.yaml", "r") as f:
-    #     metrics = yaml.safe_load(f)
+# visualize_data(onedrive)
 
-    pprint(tracker)
+# tracker = dict()
+# with open("models/BayesianRidge_results.yaml", "r") as f:
+#     tracker = yaml.load(f, Loader=yaml.UnsafeLoader)
+# # fig = get_simulation_plot(tracker, "Strategy1")
+
+# pprint(tracker)

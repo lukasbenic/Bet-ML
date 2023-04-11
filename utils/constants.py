@@ -1,3 +1,4 @@
+from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.linear_model import (
     BayesianRidge,
     LinearRegression,
@@ -11,6 +12,8 @@ from sklearn.svm import SVR
 from sklearn.neighbors import KNeighborsRegressor
 
 from ensemble_regressor import EnsembleRegressor
+from xgboost import XGBRegressor
+
 
 FIELD_NAMES = [
     "bet_id",
@@ -33,7 +36,7 @@ FIELD_NAMES = [
 ]
 
 # Hyperparam for sorting out the end
-TIME_BEFORE_START = 20
+TIME_BEFORE_START = 5
 
 KELLY_PERCENT = 0.05
 
@@ -89,4 +92,6 @@ regression_models = {
     "KNeighborsRegressor": KNeighborsRegressor,
     "BayesianRidge": BayesianRidge,
     "Ensemble": EnsembleRegressor,
+    "GaussianProcessRegressor": GaussianProcessRegressor,
+    "XGBRegressor": XGBRegressor,
 }

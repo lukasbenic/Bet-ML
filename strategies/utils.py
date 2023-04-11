@@ -1,7 +1,9 @@
 import os
 from typing import List, Tuple
+import joblib
 import numpy as np
 import pyro
+from stable_baselines3 import PPO
 from deep_learning.bayesian_regression import (
     BayesianRegressionModel,
     prepare_data,
@@ -74,16 +76,10 @@ def get_strategy(
             max_selection_exposure=100000,
         )
     if strategy == "RLStrategy":
-        model, clm, scaler = train_test_model(
-            ticks_df,
-            onedrive,
-            model_name=model_name,
-        )
+        rl_agent = PPO.load(f"RL/{model_name}/{model_name}_model")
         strategy_pick = RLStrategy(
-            model=model,
+            rl_agent=rl_agent,
             ticks_df=ticks_df,
-            clm=clm,
-            scaler=scaler,
             balance=balance,
             test_analysis_df=test_analysis_df,
             market_filter={"markets": market_file},
@@ -94,16 +90,10 @@ def get_strategy(
         )
 
     if strategy == "RLStrategyGreen":
-        model, clm, scaler = train_test_model(
-            ticks_df,
-            onedrive,
-            model_name=model_name,
-        )
+        rl_agent = PPO.load(f"RL/{model_name}/{model_name}_model")
         strategy_pick = RLStrategy(
-            model=model,
+            rl_agent=rl_agent,
             ticks_df=ticks_df,
-            clm=clm,
-            scaler=scaler,
             balance=balance,
             test_analysis_df=test_analysis_df,
             market_filter={"markets": market_file},
