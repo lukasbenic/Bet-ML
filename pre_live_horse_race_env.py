@@ -4,6 +4,7 @@ import math
 import gym
 from gym.spaces import Discrete, Box
 import joblib
+from matplotlib import pyplot as plt
 import numpy as np
 import optuna
 from sklearn.base import BaseEstimator
@@ -13,7 +14,14 @@ from onedrive import Onedrive
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3 import PPO, DDPG, DQN
 from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
-from utils.utils import (
+from utils.rl_model_utils import (
+    get_high,
+    get_low,
+    get_timepoints,
+    get_timesteps,
+    get_timesteps_and_timepoints,
+)
+from utils.strategy_utils import (
     calculate_kelly_stake,
     calculate_margin,
     calculate_odds,
@@ -23,11 +31,7 @@ from utils.config import app_principal, SITE_URL
 from pandas import DataFrame
 from stable_baselines3.common.monitor import Monitor
 import pandas as pd
-
-
-from utils.utils import get_train_data
-
-# os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
+from utils.data_utils import get_train_data
 
 
 class Actions(Enum):
@@ -36,82 +40,58 @@ class Actions(Enum):
 
 
 class PreLiveHorseRaceEnv(gym.Env):
-    def __init__(self, obs_df: DataFrame, target_df: DataFrame, regressor: str):
+    def __init__(self, X: DataFrame, y: DataFrame):
         super(PreLiveHorseRaceEnv, self).__init__()
-        self.obs_df = obs_df
-        self.regressor = joblib.load(f"models/{regressor}.pkl")
-        self.regressor_name = regressor
+        self.X = X
         self.balance = 100000.00
-        self.target_df = target_df
+        self.y = y
         self.current_step = 0
+        self.timepoints = get_timepoints(X)
+        self.current_timepoint = self.timepoints[0]
         self.action_space = Discrete(len(Actions))
         self.observation_space = Box(
-            low=obs_df.min().values,
-            high=obs_df.max().values,
-            shape=(obs_df.shape[1],),
+            low=get_low(
+                X, self.timepoints[self.current_step]
+            ),  # update this as we need to get the low and high based onn all the observations from different time points e.g. look at all means and find low and high 
+                # do the same for rest of features
+            high=get_high(X, self.timepoints[self.current_step]),
+            shape=(7,),
             dtype=np.float64,
         )
 
     def step(self, action):
-        # NOTE - this might not be necessary
-        if isinstance(action, np.ndarray) and action.size == 1:
-            action = action.item()
-        elif isinstance(action, list) and len(action) == 1:
-            action = action[0]
+        reward = 1
 
-        # reward = 0
-        state = self.obs_df.iloc[self.current_step]
-        predict_row = state.to_frame().T
+        observation = self._get_observation()
+        print(observation)
+        bsp = self.y.iloc[self.current_step].to_frame().T["bsp"].values[0]
 
-        target = self.target_df.iloc[self.current_step]
-
-        # Inform our decision
-        predicted_bsp = self.regressor.predict(predict_row)[0]
-
-        target_value = target["bsps_temp"]
-        mean_120 = state["mean_120"]
-        vol_120 = state["volume_120"]
-        std_120 = state["std_120"]
-
-        # predicted_odds = calculate_odds(predicted_bsp, target_value, mean_120)
-        reward, stake, margin = self._calculate_reward(
-            action, predicted_bsp, target_value
-        )
         self.current_step += 1
-        self.balance += reward  # update for accurate kelly_stake if using
+        self.current_timepoint = self.timepoints[self.current_step]
 
-        done = (
-            True
-            if self.current_step >= self.obs_df.shape[0] or self.balance <= 0
-            else False
-        )
+        done = self._is_done()
 
-        next_state = None if done else self.obs_df.iloc[self.current_step].values
+        next_observation = self._get_observation()
+
         info = {
-            # "predicted_odds": predicted_odds,
-            "predicted_bsp": predicted_bsp,
-            "stake": stake,
-            "margin": margin,
-            "balance": self.balance,
-            "step": self.current_step,
+            "current_step": self.current_step,
+            "current_timepoint": self.current_timepoint,
+            "reward": reward,
+            "bsp": bsp,
         }
 
-        return next_state, reward / 1000, done, info
+        return next_observation, reward, done, info
 
-    def _calculate_reward(self, action, predicted_bsp, target_value):
-        side = "BACK" if action == Actions.BACK.value else "LAY"
-        stake = calculate_stake(500, predicted_bsp, side)
-        margin = calculate_margin(side, stake, predicted_bsp, target_value)
-        reward = (
-            margin * 0.95 if margin > 0 else margin
-        )  # remove 5% for commission onn profit
-
-        return reward, stake, margin
+    def _calculate_reward(self, action, state, target):
+        pass
 
     def reset(self):
-        self.current_step = 0
+        self.current_step = 0  # start at first row of observation space
+        self.current_timepoint = self.timepoints[0]  # start at 14400 before race starts
         self.balance = 100000.00
-        return self.obs_df.iloc[self.current_step].values
+        observation = self._get_observation()
+
+        return observation
 
     def render(self, mode="human"):
         pass
@@ -119,8 +99,30 @@ class PreLiveHorseRaceEnv(gym.Env):
     def close(self):
         pass
 
+    def _get_reward(self, action, observation, bsp):
+        pass
 
-# NOTE support for ddpg and dqn not available
+    def _is_done(self):
+        return (
+            True
+            if self.balance <= 0 or self.current_timepoint == self.timepoints[-1]
+            else False  # end of row
+        )
+
+    def _get_observation(self) -> np.ndarray:
+        row = self.X.iloc[self.current_step]
+        filtered_row = row.filter(
+            regex=f"^(?!lay|back).*_{self.current_timepoint}$"
+        ).values
+        lay_back_values = row[["lay", "back"]].values
+        observation = np.hstack([filtered_row, lay_back_values])
+
+        if observation.shape[0] != 7:
+            raise ValueError(f"Unexpected observation shape: {observation.shape}")
+
+        return observation
+
+
 def create_model(model_name: str, env, device, net_arch, learning_rate):
     if model_name.lower() == "dqn":
         policy_kwargs = dict(
@@ -176,23 +178,22 @@ def train_model(
         # tensorboard_callback = TensorBoardRewardLogger(f"RL/{model_name}/tensorboard/")
         print("model trainining commenced...")
         model.learn(
-            total_timesteps=n_timesteps,
+            total_timesteps=n_timesteps,  # timepoints each row x rows
             callback=eval_callback,
         )
     else:
         model.learn(total_timesteps=n_timesteps)
 
     if save:
-        model.save(f"RL/{model_name}/{model_name}_{env.regressor_name}_model")
+        model.save(f"RL/{model_name}/{model_name}_model")
 
     return eval_callback.best_mean_reward
 
 
 def train_optimize_model(
     model_name: str,
-    obs_df: pd.DataFrame,
-    target_df: pd.DataFrame,
-    regressor,
+    X: pd.DataFrame,
+    y: pd.DataFrame,
     n_trials=100,
     n_timesteps=25000,
     timeout=600,
@@ -208,12 +209,12 @@ def train_optimize_model(
         net_arch = dict(pi=[pi_layers, pi_layers], vf=[vf_layers, vf_layers])
 
         # ensure no interaction between different models trained, so we create a new one for each model
-        env = PreLiveHorseRaceEnv(obs_df, target_df, regressor=regressor)
+        env = PreLiveHorseRaceEnv(X, y)
         model = create_model(model_name, env, device, net_arch, learning_rate)
 
         # Train the model and evaluate it
         # Env for evaluation
-        eval_env = PreLiveHorseRaceEnv(obs_df, target_df, regressor=regressor)
+        eval_env = PreLiveHorseRaceEnv(X, y)
         eval_metric = train_model(
             model=model,
             env=eval_env,
@@ -229,7 +230,7 @@ def train_optimize_model(
     study.optimize(objective, n_trials=n_trials, timeout=timeout, n_jobs=1)
 
     print(f"Best hyperparameters: {study.best_params}")
-    new_env = PreLiveHorseRaceEnv(obs_df, target_df, regressor=regressor)
+    new_env = PreLiveHorseRaceEnv(X, y)
 
     best_params = study.best_params
     best_net_arch = dict(
@@ -248,49 +249,56 @@ def train_optimize_model(
     )
 
 
+def train_model2(model_name: str, env: PreLiveHorseRaceEnv, timesteps: int):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_class = {
+        "ppo": PPO,
+    }.get(model_name.lower())
+
+    if model_class is None:
+        raise ValueError(f"Unsupported model: {model_name}")
+
+    model = model_class(
+        "MlpPolicy",
+        env,
+        verbose=1,
+        seed=42,
+        device=device,
+    )
+    model.learn(total_timesteps=timesteps)
+
+    return model
+
+
 if __name__ == "__main__":
     onedrive = Onedrive(
         client_id=app_principal["client_id"],
         client_secret=app_principal["client_secret"],
         site_url=SITE_URL,
     )
-    ticks_df = onedrive.get_folder_contents(
-        target_folder="ticks", target_file="ticks.csv"
-    )
-    bsp_df = onedrive.get_bsps(target_folder="july_22_bsps")
 
-    obs_df, target_df, _ = get_train_data(
-        "utils/x_train_df.csv",
-        "utils/y_train_df.csv",
+    X, y = get_train_data(
         onedrive,
-        ticks_df,
-        regression=True,
     )
-    # env = DummyVecEnv([lambda: PreLiveHorseRaceEnv(obs_df, target_df)])
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--rl_model",
-        type=str,
-        default="PPO",
-        help="RL algorithm to use.",
-    )
+    X[["lay", "back"]] = 0
+    timesteps = get_timesteps(X)
 
-    parser.add_argument(
-        "--regression_model",
-        type=str,
-        default="Ensemble",
-        help="Regression model to use.",
-    )
-
-    args = parser.parse_args()
-    env = PreLiveHorseRaceEnv(obs_df, target_df, regressor=args.regression_model)
-    # lstm_net_arch = dict(pi=[64, 64, ("lstm", 64)], vf=[64, 64, ("lstm", 64)])
-    # small_net_arch = dict(pi=[32, 32], vf=[32,  32])
-    train_optimize_model(
-        model_name=args.rl_model,
-        obs_df=obs_df,
-        target_df=target_df,
-        regressor=args.regression_model,
-    )
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument(
+    #     "--rl_model",
+    #     type=str,
+    #     default="PPO",
+    #     help="RL algorithm to use.",
+    # )
+    # args = parser.parse_args()
+    env = PreLiveHorseRaceEnv(X, y)
+    model = train_model2("PPO", env, timesteps)
+    # # lstm_net_arch = dict(pi=[64, 64, ("lstm", 64)], vf=[64, 64, ("lstm", 64)])
+    # # small_net_arch = dict(pi=[32, 32], vf=[32,  32])
+    # train_optimize_model(
+    #     model_name=args.rl_model,
+    #     X=X,
+    #     y=y,
+    # )
     # model = PPO.load("RL/PPO/PPO_model")
     # print("policy", model.policy)

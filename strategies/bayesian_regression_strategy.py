@@ -13,7 +13,7 @@ import torch
 from utils.constants import TIME_BEFORE_START
 
 from toms_utils import normalized_transform
-from utils.utils import preprocess_test_analysis
+from utils.data_utils import preprocess_test_analysis
 
 
 class BayesianRegressionStrategy(BaseStrategy):

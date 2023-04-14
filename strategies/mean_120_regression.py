@@ -12,17 +12,16 @@ from flumine.order.order import (
 )
 from flumine.markets.market import Market
 from betfairlightweight.resources import MarketBook, RunnerBook
-from sklearn.preprocessing import StandardScaler
 from utils.constants import KELLY_PERCENT, TIME_BEFORE_START
-from utils.utils import (
+from utils.strategy_utils import (
     calculate_gambled,
     calculate_kelly_stake,
     calculate_margin,
     calculate_odds,
     calculate_stake,
-    normalized_transform,
-    preprocess_test_analysis,
+    kelly_stake,
 )
+from utils.data_utils import preprocess_test_analysis, normalized_transform
 
 
 class Mean120Regression(BaseStrategy):
@@ -68,7 +67,7 @@ class Mean120Regression(BaseStrategy):
         self.matched_lay_bet_tracker = {}
         self.seconds_to_start = None
         self.market_open = True
-        # self.stake = 50
+        self.max_stake = 500
         self.first_nonrunners = True
         self.runner_number = None
 
@@ -197,65 +196,56 @@ class Mean120Regression(BaseStrategy):
                 mean_120,
                 std_120,
                 vol_120,
+                RWoML_120,
+                RWoMB_120,
             ) = self._get_model_prediction_and_features(
                 runner=runner, market_id=market_id
             )
 
-            if not mean_120 or not runner_predicted_bsp or not std_120 or not vol_120:
+            if (
+                not mean_120
+                or not runner_predicted_bsp
+                or not std_120 >= 0.03
+                or not vol_120
+            ):
                 continue
-
-            # (
-            #     back_price_adjusted,
-            #     back_confidence_price,
-            #     back_bsp_value,
-            # ) = self._get_adjusted_prices2(
-            #     market_id=market_id, runner=runner, mean_120=mean_120, side="BACK"
-            # )
-
-            # (
-            #     lay_price_adjusted,
-            #     lay_confidence_price,
-            #     lay_bsp_value,
-            # ) = self._get_adjusted_prices2(
-            #     market_id=market_id, runner=runner, mean_120=mean_120, side="LAY"
-            # )
 
             (
                 back_price_adjusted,
                 back_confidence_price,
                 back_bsp_value,
-            ) = self._get_adjusted_prices(
-                market_id=market_id,
-                runner=runner,
-                mean_120=mean_120,
-                std_120=std_120,
-                vol_120=vol_120,
-                side="BACK",
+            ) = self._get_adjusted_prices2(
+                market_id=market_id, runner=runner, mean_120=mean_120, side="BACK"
             )
 
             (
                 lay_price_adjusted,
                 lay_confidence_price,
                 lay_bsp_value,
-            ) = self._get_adjusted_prices(
-                market_id=market_id,
-                runner=runner,
-                mean_120=mean_120,
-                std_120=std_120,
-                vol_120=vol_120,
-                side="LAY",
+            ) = self._get_adjusted_prices2(
+                market_id=market_id, runner=runner, mean_120=mean_120, side="LAY"
             )
 
-            # print("PRICES ADJUSTED", back_price_adjusted, lay_price_adjusted)
-            # print("CONFIDENCE PRICES", back_confidence_price, lay_confidence_price)
-            # print("BSPS", back_bsp_value, lay_bsp_value)
-            # print("MEAN120", mean_120)
+            # here is action lay
+            if (
+                runner_predicted_bsp > lay_confidence_price
+                and lay_price_adjusted <= self.max_stake
+                and lay_price_adjusted > 1.1
+                and runner.selection_id not in self.lay_bet_tracker[market_id].keys()
+            ):
+                self._create_order(
+                    market_id,
+                    runner,
+                    lay_confidence_price,
+                    mean_120,
+                    lay_price_adjusted,
+                    lay_bsp_value,
+                    market,
+                    side="LAY",
+                )
 
-            # here is action back
             if (
                 runner_predicted_bsp < back_confidence_price
-                and mean_120 <= 50
-                and mean_120 > 1.1
                 and runner.selection_id not in self.back_bet_tracker[market_id].keys()
             ):
                 print(
@@ -273,31 +263,6 @@ class Mean120Regression(BaseStrategy):
                     back_bsp_value,
                     market,
                     side="BACK",
-                )
-
-            # here is action lay
-            if (
-                runner_predicted_bsp > lay_confidence_price
-                # and lay_price_adjusted <= self.stake
-                and lay_price_adjusted > 1.1
-                and runner.selection_id not in self.lay_bet_tracker[market_id].keys()
-            ):
-                print(
-                    "lay predicted",
-                    runner_predicted_bsp,
-                    "lay confidence",
-                    lay_confidence_price,
-                )
-
-                self._create_order(
-                    market_id,
-                    runner,
-                    lay_confidence_price,
-                    mean_120,
-                    lay_price_adjusted,
-                    lay_bsp_value,
-                    market,
-                    side="LAY",
                 )
 
     def process_orders(self, market: Market, orders: list) -> None:
@@ -598,8 +563,8 @@ class Mean120Regression(BaseStrategy):
         # )
         # print("myodds", odds, "betfair odds", current_odds)
         # stake = calculate_kelly_stake(balance=self.balance, odds=odds)
-        stake = calculate_stake(50, price_adjusted, side)
-        print("stake m8", stake)
+        stake = calculate_stake(self.max_stake, price_adjusted, side)
+        # k_stake = kelly_stake()
         order = trade.create_order(
             side=side,
             order_type=LimitOrder(
@@ -652,7 +617,7 @@ class Mean120Regression(BaseStrategy):
             "number"
         ]
         number_adjust = number
-        confidence_number = number + 15 if side == "LAY" else number - 10
+        confidence_number = number + 5 if side == "LAY" else number - 3  # try(12, 4)
         confidence_price = self.ticks_df.iloc[
             self.ticks_df["number"].sub(confidence_number).abs().idxmin()
         ]["tick"]
@@ -672,9 +637,11 @@ class Mean120Regression(BaseStrategy):
         mean_120: np.float64,
         std_120: np.float64,
         vol_120: np.float64,
+        RWoM_120: np.float64,
         runner: RunnerBook,
         market_id: float,
         side: str,
+        normalization_factor: int = 10,
     ) -> Tuple[np.float64, np.float64, np.float64]:
         """
         Calculate adjusted prices for back and lay bets along with the BSP value.
@@ -689,10 +656,12 @@ class Mean120Regression(BaseStrategy):
             "number"
         ]
         number_adjust = number
+        liquidity_adjusted_volatility = std_120 / np.sqrt(vol_120)
+        normalized_volatility = liquidity_adjusted_volatility / normalization_factor
         confidence_number = (
-            number + (std_120 / vol_120)
+            number + normalized_volatility - RWoM_120
             if side == "LAY"
-            else number - (std_120 / vol_120)
+            else number - normalized_volatility + RWoM_120
         )
 
         confidence_price = self.ticks_df.iloc[
@@ -737,7 +706,7 @@ class Mean120Regression(BaseStrategy):
             else self.matched_lay_bet_tracker
         )
 
-    def _get_model_prediction_and_features(
+    def _get_model_prediction_and_features_normalized(
         self, runner: RunnerBook, market_id: float
     ) -> Tuple[np.float64, np.float64]:
         predict_row = self.test_analysis_df.loc[
@@ -758,3 +727,29 @@ class Mean120Regression(BaseStrategy):
         )
 
         return runner_predicted_bsp, mean_120, std_120, vol_120
+
+    def _get_model_prediction_and_features(
+        self, runner: RunnerBook, market_id: float
+    ) -> Tuple[np.float64, np.float64]:
+        predict_row = self.test_analysis_df.loc[
+            (self.test_analysis_df["selection_ids"] == runner.selection_id)
+            & (self.test_analysis_df["market_id"] == market_id)
+        ]
+        mean_120 = predict_row["mean_120"].values[0]
+        std_120 = predict_row["std_120"].values[0]
+        vol_120 = predict_row["volume_120"].values[0]
+        RWoML_120 = predict_row["RWoML_120"].values[0]
+        RWoMB_120 = predict_row["RWoMB_120"].values[0]
+
+        predict_row = predict_row.drop(
+            ["Unnamed: 0", "market_id", "bsps", "selection_ids"], axis=1
+        )
+        predict_row = pd.DataFrame(self.scaler.transform(predict_row), columns=self.clm)
+        runner_predicted_bsp = self.model.predict(predict_row)
+        runner_predicted_bsp = (
+            runner_predicted_bsp[0]
+            if isinstance(runner_predicted_bsp, np.ndarray)
+            else runner_predicted_bsp
+        )
+
+        return runner_predicted_bsp, mean_120, std_120, vol_120, RWoML_120, RWoMB_120

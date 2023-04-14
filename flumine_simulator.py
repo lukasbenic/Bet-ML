@@ -1,14 +1,14 @@
 import logging
 import os
 import time
-from pprint import pprint
+import pandas as pd
 import yaml
 from onedrive import Onedrive
 from flumine import FlumineSimulation
 from pythonjsonlogger import jsonlogger
 from flumine.clients import SimulatedClient
-from strategies.utils import get_strategy
-from utils.utils import update_tracker
+from strategies.get_strategy import get_strategy
+from utils.strategy_utils import calculate_performance_metrics, update_tracker
 from deep_learning.vae_regressor import VAE
 
 
@@ -18,9 +18,6 @@ def run(
 ):
     framework.add_strategy(strategy)
     framework.run()
-
-    for market in framework.markets:
-        strategy.metrics["profit"] += sum([o.simulated.profit for o in market.blotter])
 
     return strategy.metrics
 
@@ -94,8 +91,18 @@ def piped_run(
         # NOTE it shows balance from previous run???
         tracker["balance"] = strategy.balance
 
+    # Call the function to calculate performance metrics
+    performanc_metrics = calculate_performance_metrics(tracker)
+
     if save:
-        with open(f"results/{strategy_name}_results.yaml", "w") as f:
-            yaml.dump(tracker, f)
+        # Save the results to a CSV file instead of a YAML file
+        metrics_df = pd.DataFrame.from_dict(performanc_metrics, orient="index").T
+        tracker_df = pd.DataFrame.from_dict(tracker, orient="index").T
+        metrics_df.to_csv(
+            f"results/{strategy_name}_{model_name}_results.csv", index=False
+        )
+        tracker_df.to_csv(
+            f"results/{strategy_name}_{model_name}_tracker.csv", index=False
+        )
 
     return tracker

@@ -8,7 +8,7 @@ from flumine import clients
 
 from onedrive import Onedrive
 from utils.config import SITE_URL, app_principal
-from utils.utils import get_simulation_plot
+from utils.strategy_utils import get_simulation_plot
 
 
 def rl_run(model_name, save):

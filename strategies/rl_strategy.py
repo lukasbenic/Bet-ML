@@ -15,15 +15,14 @@ from betfairlightweight.resources import MarketBook, RunnerBook
 from stable_baselines3 import PPO
 from pre_live_horse_race_env import Actions
 from utils.constants import KELLY_PERCENT, TIME_BEFORE_START
-from utils.utils import (
+from utils.strategy_utils import (
     calculate_gambled,
     calculate_kelly_stake,
     calculate_margin,
     calculate_odds,
     calculate_stake,
-    normalized_transform,
-    preprocess_test_analysis,
 )
+from utils.data_utils import preprocess_test_analysis, normalized_transform
 
 
 class RLStrategy(BaseStrategy):

@@ -36,7 +36,7 @@ FIELD_NAMES = [
 ]
 
 # Hyperparam for sorting out the end
-TIME_BEFORE_START = 5
+TIME_BEFORE_START = 15
 
 KELLY_PERCENT = 0.05
 

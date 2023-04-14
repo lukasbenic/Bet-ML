@@ -1,6 +1,6 @@
 import streamlit as st
 import yaml
-from utils.utils import get_simulation_plot
+from utils.strategy_utils import get_simulation_plot
 
 
 def display_data_row_wise(

@@ -1,13 +1,10 @@
 from pprint import pprint
 
-import yaml
 from onedrive import Onedrive
 from flumine_simulator import piped_run
 from matplotlib import pyplot as plt
 from utils.config import app_principal, SITE_URL
 import argparse
-
-from utils.utils import visualize_data
 
 
 plt.rcParams["figure.figsize"] = (20, 3)
@@ -32,15 +29,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--strategy_name",
         type=str,
-        default="Mean120Regression",
+        default="Mean120RegressionGreen",
         help="Name of the strategy to use",
     )
 
-    # Lassso is ok
+    # Our ensemble is from KNeigh, RFR, GradBoostReg (in hex)
     parser.add_argument(
         "--model_name",
         type=str,
-        default="Ridge",
+        default="GradientBoostingRegressor",
         help="Name of the model to use",
     )
 
