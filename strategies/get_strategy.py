@@ -1,7 +1,5 @@
 import os
-from typing import List, Tuple
-import joblib
-import numpy as np
+from typing import List
 import pyro
 from stable_baselines3 import PPO
 from deep_learning.bayesian_regression import (
@@ -20,7 +18,6 @@ from strategies.bayesian_regression_strategy import (
 from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import ClippedAdam
 from pyro.infer.autoguide import AutoDiagonalNormal
-from betfairlightweight.resources import MarketBook, RunnerBook
 
 
 def get_strategy(

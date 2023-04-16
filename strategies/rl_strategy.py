@@ -1,4 +1,4 @@
-from typing import Dict, Tuple, Union
+from typing import Dict, Tuple
 import numpy as np
 import pandas as pd
 
@@ -14,12 +14,10 @@ from flumine.markets.market import Market
 from betfairlightweight.resources import MarketBook, RunnerBook
 from stable_baselines3 import PPO
 from pre_live_horse_race_env import Actions
-from utils.constants import KELLY_PERCENT, TIME_BEFORE_START
+from utils.constants import TIME_BEFORE_START
 from utils.strategy_utils import (
     calculate_gambled,
-    calculate_kelly_stake,
     calculate_margin,
-    calculate_odds,
     calculate_stake,
 )
 from utils.data_utils import preprocess_test_analysis, normalized_transform
@@ -507,10 +505,6 @@ class RLStrategy(BaseStrategy):
 
         is_price_above_bsp = price_adjusted > bsp_value
         self.metrics["q_correct" if is_price_above_bsp else "q_incorrect"] += 1
-
-        # Kelly Stake
-        # odds = calculate_odds(bsp_value, confidence_price, mean_120)
-        # stake = calculate_kelly_stake(balance=self.balance, odds=odds)
 
         # Fixed Stake
         stake = calculate_stake(50.00, price_adjusted, side)

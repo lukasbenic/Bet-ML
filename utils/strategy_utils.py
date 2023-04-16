@@ -1,30 +1,11 @@
 import numpy as np
 import os
-from typing import List
 from collections import deque
-
 import pandas as pd
 import seaborn as sns
 from matplotlib import pyplot as plt
-
-import pyro
-from pyro.infer import SVI, Trace_ELBO
-from pyro.optim import ClippedAdam
-from pyro.infer.autoguide import AutoDiagonalNormal
-
 from pprint import pprint
-
-from stable_baselines3 import PPO
-
-from deep_learning.bayesian_regression import (
-    BayesianRegressionModel,
-    prepare_data,
-    train_bayesian_regression,
-)
 from onedrive import Onedrive
-from utils.constants import KELLY_PERCENT
-import math
-import itertools
 from scipy import stats
 
 
@@ -214,21 +195,6 @@ def calculate_stake(stake: float, price_adjusted: float, side: str) -> float:
         else stake
     )
     return stake
-
-
-def calculate_kelly_stake(balance: float, odds: float) -> float:
-    """
-    Calculates the stake using the Kelly staking method with a fixed k% of 3%.
-
-    Args:
-        balance (float): The current bank size.
-        odds (float): The decimal odds of the selection.
-
-    Returns:
-        float: The stake size.
-    """
-    kelly_stake = (balance * KELLY_PERCENT * (odds - 1)) / (odds - 1)
-    return round(kelly_stake, 2)
 
 
 def kelly_stake(p, odds, bankroll):

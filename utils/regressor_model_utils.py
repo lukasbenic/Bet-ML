@@ -3,7 +3,6 @@ from typing import Any, Dict, Tuple, Union
 import joblib
 import numpy as np
 import os
-from pprint import pprint
 import pandas as pd
 from matplotlib import pyplot as plt
 from sklearn.gaussian_process import GaussianProcessRegressor
@@ -41,7 +40,7 @@ from optuna.samplers import TPESampler
 from ensemble_regressor import EnsembleRegressor
 
 from onedrive import Onedrive
-from utils.constants import KELLY_PERCENT, regression_models
+from utils.constants import regression_models
 from utils.data_utils import get_test_data, get_train_data
 
 

@@ -1,4 +1,4 @@
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict, Tuple
 import numpy as np
 import pandas as pd
 
@@ -12,14 +12,11 @@ from flumine.order.order import (
 )
 from flumine.markets.market import Market
 from betfairlightweight.resources import MarketBook, RunnerBook
-from utils.constants import KELLY_PERCENT, TIME_BEFORE_START
+from utils.constants import TIME_BEFORE_START
 from utils.strategy_utils import (
     calculate_gambled,
-    calculate_kelly_stake,
     calculate_margin,
-    calculate_odds,
     calculate_stake,
-    kelly_stake,
 )
 from utils.data_utils import preprocess_test_analysis, normalized_transform
 
@@ -67,7 +64,7 @@ class Mean120Regression(BaseStrategy):
         self.matched_lay_bet_tracker = {}
         self.seconds_to_start = None
         self.market_open = True
-        self.max_stake = 500
+        self.max_stake = self.balance * 0.08
         self.first_nonrunners = True
         self.runner_number = None
 
@@ -205,8 +202,10 @@ class Mean120Regression(BaseStrategy):
             if (
                 not mean_120
                 or not runner_predicted_bsp
-                or not std_120 >= 0.03
+                or not std_120
                 or not vol_120
+                or not RWoML_120
+                or not RWoMB_120
             ):
                 continue
 
@@ -214,7 +213,7 @@ class Mean120Regression(BaseStrategy):
                 back_price_adjusted,
                 back_confidence_price,
                 back_bsp_value,
-            ) = self._get_adjusted_prices2(
+            ) = self._get_adjusted_prices(
                 market_id=market_id, runner=runner, mean_120=mean_120, side="BACK"
             )
 
@@ -222,7 +221,7 @@ class Mean120Regression(BaseStrategy):
                 lay_price_adjusted,
                 lay_confidence_price,
                 lay_bsp_value,
-            ) = self._get_adjusted_prices2(
+            ) = self._get_adjusted_prices(
                 market_id=market_id, runner=runner, mean_120=mean_120, side="LAY"
             )
 
@@ -236,8 +235,6 @@ class Mean120Regression(BaseStrategy):
                 self._create_order(
                     market_id,
                     runner,
-                    lay_confidence_price,
-                    mean_120,
                     lay_price_adjusted,
                     lay_bsp_value,
                     market,
@@ -257,8 +254,6 @@ class Mean120Regression(BaseStrategy):
                 self._create_order(
                     market_id,
                     runner,
-                    back_confidence_price,
-                    mean_120,
                     back_price_adjusted,
                     back_bsp_value,
                     market,
@@ -520,9 +515,7 @@ class Mean120Regression(BaseStrategy):
         self,
         market_id: float,
         runner: RunnerBook,
-        confidence_price,
-        mean_120,
-        price_adjusted,
+        price_adjusted: np.float64,
         bsp_value: float,
         market: Market,
         side: str,
@@ -554,17 +547,7 @@ class Mean120Regression(BaseStrategy):
 
         is_price_above_bsp = price_adjusted > bsp_value
         self.metrics["q_correct" if is_price_above_bsp else "q_incorrect"] += 1
-
-        # odds = calculate_odds(bsp_value, confidence_price, mean_120)
-        # current_odds = (
-        #     runner.ex.available_to_back[0].price
-        #     if side == "BACK"
-        #     else runner.ex.available_to_lay[0].price
-        # )
-        # print("myodds", odds, "betfair odds", current_odds)
-        # stake = calculate_kelly_stake(balance=self.balance, odds=odds)
         stake = calculate_stake(self.max_stake, price_adjusted, side)
-        # k_stake = kelly_stake()
         order = trade.create_order(
             side=side,
             order_type=LimitOrder(
@@ -575,7 +558,7 @@ class Mean120Regression(BaseStrategy):
         )
 
         print(
-            f"{side} order created at {self.seconds_to_start}: \n\tmarket id {market_id} \n\tmarket {market} \n\trunner {runner} \n\tprice adjusted {price_adjusted} \n\tbsp_value {bsp_value} \n\tOrder size (kelly_stake): {stake}"
+            f"{side} order created at {self.seconds_to_start}: \n\tmarket id {market_id} \n\tmarket {market} \n\trunner {runner} \n\tprice adjusted {price_adjusted} \n\tbsp_value {bsp_value} \n\tOrder size: {stake}"
         )
 
         # Get trackers based on order side
@@ -597,51 +580,12 @@ class Mean120Regression(BaseStrategy):
         margin = calculate_margin(side, stake, price_adjusted, bsp_value)
         self.metrics["q_margin"] += margin
 
-    def _get_adjusted_prices2(
-        self,
-        mean_120: np.float64,
-        runner: RunnerBook,
-        market_id: float,
-        side: str,
-    ) -> Tuple[np.float64, np.float64, np.float64]:
-        """
-        Calculate adjusted prices for back and lay bets along with the BSP value.
-
-        :param test_analysis_df_y: A DataFrame containing the test analysis data
-        :param mean_120: The mean_120 value for the current runner
-        :param runner: The current RunnerBook object
-        :param market_id: The market ID for the current market
-        :return: A tuple containing the adjusted price, confidence price, and BSP value
-        """
-        number = self.ticks_df.iloc[self.ticks_df["tick"].sub(mean_120).abs().idxmin()][
-            "number"
-        ]
-        number_adjust = number
-        confidence_number = number + 5 if side == "LAY" else number - 3  # try(12, 4)
-        confidence_price = self.ticks_df.iloc[
-            self.ticks_df["number"].sub(confidence_number).abs().idxmin()
-        ]["tick"]
-        price_adjusted = self.ticks_df.iloc[
-            self.ticks_df["number"].sub(number_adjust).abs().idxmin()
-        ]["tick"]
-        bsp_row = self.test_analysis_df_y.loc[
-            (self.test_analysis_df_y["selection_ids"] == runner.selection_id)
-            & (self.test_analysis_df_y["market_id"] == market_id)
-        ]
-        bsp_value = bsp_row["bsps"].values[0]
-
-        return price_adjusted, confidence_price, bsp_value
-
     def _get_adjusted_prices(
         self,
         mean_120: np.float64,
-        std_120: np.float64,
-        vol_120: np.float64,
-        RWoM_120: np.float64,
         runner: RunnerBook,
         market_id: float,
         side: str,
-        normalization_factor: int = 10,
     ) -> Tuple[np.float64, np.float64, np.float64]:
         """
         Calculate adjusted prices for back and lay bets along with the BSP value.
@@ -656,14 +600,9 @@ class Mean120Regression(BaseStrategy):
             "number"
         ]
         number_adjust = number
-        liquidity_adjusted_volatility = std_120 / np.sqrt(vol_120)
-        normalized_volatility = liquidity_adjusted_volatility / normalization_factor
         confidence_number = (
-            number + normalized_volatility - RWoM_120
-            if side == "LAY"
-            else number - normalized_volatility + RWoM_120
-        )
-
+            number + 12 if side == "LAY" else number - 4
+        )  # try(12, 4) was 5, 3
         confidence_price = self.ticks_df.iloc[
             self.ticks_df["number"].sub(confidence_number).abs().idxmin()
         ]["tick"]
