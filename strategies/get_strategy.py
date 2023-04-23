@@ -1,23 +1,21 @@
 import os
 from typing import List
+import joblib
 import pyro
 from stable_baselines3 import PPO
-from deep_learning.bayesian_regression import (
-    BayesianRegressionModel,
-    prepare_data,
-    train_bayesian_regression,
-)
+from deep_learning.bayesian_regression import BayesianRegressionModel
+from strategies.mean_120_bayesian_regression import Mean120BayesianRegression
+from utils.bayesian_regression_utils import prepare_data, train_bayesian_regression
 from onedrive import Onedrive
-from strategies.bayesian_regression_strategy import BayesianRegressionStrategy
 from strategies.mean_120_regression import Mean120Regression
 from strategies.rl_strategy import RLStrategy
 from utils.regressor_model_utils import train_test_model
-from strategies.bayesian_regression_strategy import (
-    BayesianRegressionStrategy,
-)
+
 from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import ClippedAdam
-from pyro.infer.autoguide import AutoDiagonalNormal
+from pyro.infer.autoguide import AutoDiagonalNormal, AutoMultivariateNormal
+
+import torch
 
 
 def get_strategy(
@@ -71,9 +69,15 @@ def get_strategy(
             max_selection_exposure=100000,
         )
     if strategy == "RLStrategy":
-        rl_agent = PPO.load(f"RL/{model_name}/{model_name}_model")
+        models = model_name.split("_")
+        rl_agent = PPO.load(f"RL/{models[0]}/{model_name}/{model_name}_model")
+        tp_regressor = joblib.load(
+            f"RL/timepoint_regressors/models/{models[1]}_120.pkl"
+        )
+        # tp_regressor = joblib.load(f"models/BayesianRidge.pkl")
         strategy_pick = RLStrategy(
-            rl_agent=rl_agent,
+            model=rl_agent,
+            tp_regressor=tp_regressor,
             ticks_df=ticks_df,
             balance=balance,
             test_analysis_df=test_analysis_df,
@@ -85,9 +89,12 @@ def get_strategy(
         )
 
     if strategy == "RLStrategyGreen":
-        rl_agent = PPO.load(f"RL/{model_name}/{model_name}_model")
+        models = model_name.split("_")
+        rl_agent = PPO.load(f"RL/{models[0]}/{model_name}/{model_name}_model")
+        tp_regressor = joblib.load(f"RL/timepoint_regressors/{models[1]}_120.pkl")
         strategy_pick = RLStrategy(
-            rl_agent=rl_agent,
+            model=rl_agent,
+            tp_regressor=tp_regressor,
             ticks_df=ticks_df,
             balance=balance,
             test_analysis_df=test_analysis_df,
@@ -99,35 +106,42 @@ def get_strategy(
             green_enabled=True,
         )
 
-    # TODO Implement Balance
-    if strategy == "BayesianRegressionStrategy":
-        x_train_tensor, y_train_tensor = prepare_data(
-            x_train_path="utils/x_train_df.csv", y_train_path="utils/y_train_df.csv"
-        )
+    if strategy == "Mean120BayesianRegressionStrategy":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        print(y_train_tensor.shape)
-        print("data prepared")
-
-        optimizer = ClippedAdam(
-            {"lr": 1.0e-3, "lrd": 0.1, "clip_norm": 10.0},
+        x_train_tensor, y_train_tensor, scaler, clm = prepare_data(
+            x_train_path="utils/data/X_train.csv",
+            y_train_path="utils/data/y_train.csv",
         )
 
         num_features = x_train_tensor.shape[1]
-        br = BayesianRegressionModel(num_features)
-        guide = AutoDiagonalNormal(br)
-
-        pyro.clear_param_store()
-        svi = SVI(br, guide, optimizer, loss=Trace_ELBO())
+        br = BayesianRegressionModel(num_features).to(device)
+        guide = AutoMultivariateNormal(br).to(device)
 
         if os.path.exists(f"models/{model_name}.pkl"):
-            print("Loaded pre-existing VAE model.")
+            print("Loaded pre-existing Bayesian Regression model.")
+            guide = AutoMultivariateNormal(br).to(device)
+            pyro.get_param_store().load(f"models/{model_name}.pkl")
         else:
-            print("Commencing SVI training...")
-            train_bayesian_regression(svi, x_train_tensor, y_train_tensor, 1, 500)
+            print("Commencing Bayesian Regression training...")
+            pyro.clear_param_store()
+            optimizer = ClippedAdam(
+                {"lr": 1.0e-3, "lrd": 0.1, "clip_norm": 10.0},
+            )
+            svi = SVI(br, guide, optimizer, loss=Trace_ELBO())
+            guide = train_bayesian_regression(
+                svi, x_train_tensor, y_train_tensor, 24, 500, device
+            )
+            pyro.get_param_store().save(f"models/{model_name}.pkl")
 
-        strategy_pick = BayesianRegressionStrategy(
-            model=svi,
+        strategy_pick = Mean120BayesianRegression(
+            model=br,
+            guide=guide,
+            device=device,
+            clm=clm,
+            scaler=scaler,
             ticks_df=ticks_df,
+            balance=balance,
             test_analysis_df=test_analysis_df,
             market_filter={"markets": market_file},
             max_trade_count=100000,

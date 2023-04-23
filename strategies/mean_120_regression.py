@@ -225,7 +225,6 @@ class Mean120Regression(BaseStrategy):
                 market_id=market_id, runner=runner, mean_120=mean_120, side="LAY"
             )
 
-            # here is action lay
             if (
                 runner_predicted_bsp > lay_confidence_price
                 and lay_price_adjusted <= self.max_stake
@@ -245,12 +244,6 @@ class Mean120Regression(BaseStrategy):
                 runner_predicted_bsp < back_confidence_price
                 and runner.selection_id not in self.back_bet_tracker[market_id].keys()
             ):
-                print(
-                    "back predicted",
-                    runner_predicted_bsp,
-                    "back confidence",
-                    back_confidence_price,
-                )
                 self._create_order(
                     market_id,
                     runner,
@@ -600,9 +593,7 @@ class Mean120Regression(BaseStrategy):
             "number"
         ]
         number_adjust = number
-        confidence_number = (
-            number + 12 if side == "LAY" else number - 4
-        )  # try(12, 4) was 5, 3
+        confidence_number = number + 12 if side == "LAY" else number - 4
         confidence_price = self.ticks_df.iloc[
             self.ticks_df["number"].sub(confidence_number).abs().idxmin()
         ]["tick"]

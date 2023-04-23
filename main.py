@@ -29,7 +29,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--strategy_name",
         type=str,
-        default="Mean120Regression",
+        default="RLStrategy",
         help="Name of the strategy to use",
     )
 
@@ -37,7 +37,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_name",
         type=str,
-        default="ElasticNet",
+        default="PPO_BayesianRidge",
         help="Name of the model to use",
     )
 

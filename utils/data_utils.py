@@ -89,20 +89,12 @@ def preprocess2(df: pd.DataFrame):
     df = df[df["mean_14400"] < 30]
     df = df[df["mean_14400"] > 0.5]
     df = df[(df["mean_120"] > 1.1)]
-    # df = df[(df["mean_120"] <= 70)]
     df = df[df["mean_14400"] > 0]
     df = df.drop(df[df["std_2700"] > 1].index)  # slight hack
-
-    # df = df.clip(lower=df.quantile(0.05), upper=df.quantile(0.95), axis=1)
-
-    # df = df[df["mean_14400"] < 30]
-    # df = df[df["mean_14400"] > 0.5]
 
     return df
 
 
-# does not work well with KNeighborsRegressor
-# works well with BayesianRidge, Ridge (400 trials tuning)
 def preprocess(df: pd.DataFrame):
     def get_large_value_rows_mask(df):
         inf_columns = []
@@ -118,19 +110,10 @@ def preprocess(df: pd.DataFrame):
 
     df.fillna(0, inplace=True)
     df = df[(df["mean_120"] > 1.1)]
-    # df = df[df["mean_14400"] > 0.5]
-    # df = df[(df["mean_120"] > 1.1)]
-    # df = df[(df["mean_120"] <= 70)]
     df = df[df["mean_14400"] > 0]
     df = df.drop(df[df["std_2700"] > 1].index)  # slight hack
 
-    # df = df.clip(lower=df.quantile(0.05), upper=df.quantile(0.95), axis=1)
-
-    # df = df[df["mean_14400"] < 30]
-    # df = df[df["mean_14400"] > 0.5]
-    # Find the rows with large values
     large_value_rows_mask = get_large_value_rows_mask(df)
-
     # Drop the rows with large values
     df = df[~large_value_rows_mask]
 

@@ -186,6 +186,16 @@ def get_strategy_files(
 
 
 def calculate_stake(stake: float, price_adjusted: float, side: str) -> float:
+    """Calculate the stake amount for a given price adjustment and side.
+
+    Args:
+        stake (float): The desired stake amount.
+        price_adjusted (float): The adjusted price for the bet.
+        side (str): The side of the bet, either "LAY" or "BACK".
+
+    Returns:
+        float: The stake amount adjusted for the price.
+    """
     stake = (
         round(
             stake / (price_adjusted - 1),
@@ -195,6 +205,7 @@ def calculate_stake(stake: float, price_adjusted: float, side: str) -> float:
         else stake
     )
     return stake
+
 
 
 def kelly_stake(p, odds, bankroll):

@@ -1,6 +1,4 @@
-from copy import deepcopy
-from typing import Dict, Tuple
-import joblib
+from typing import Any, Dict, Tuple
 import numpy as np
 import pandas as pd
 
@@ -14,8 +12,6 @@ from flumine.order.order import (
 )
 from flumine.markets.market import Market
 from betfairlightweight.resources import MarketBook, RunnerBook
-from stable_baselines3 import PPO
-from plhr_env import Actions
 from utils.constants import TIME_BEFORE_START
 from utils.strategy_utils import (
     calculate_gambled,
@@ -23,27 +19,31 @@ from utils.strategy_utils import (
     calculate_stake,
 )
 from utils.data_utils import preprocess_test_analysis, normalized_transform
-from sklearn.preprocessing import StandardScaler
+from pyro.infer import Predictive
+import torch
 
 
-class RLStrategy(BaseStrategy):
+class Mean120BayesianRegression(BaseStrategy):
     def __init__(
         self,
+        scaler: Any,
         ticks_df: pd.DataFrame,
         test_analysis_df: pd.DataFrame,
         balance,
         model,
-        tp_regressor,
+        guide,
+        clm,
+        device,
         green_enabled=False,
         *args,
         **kwargs,
     ):
+        self.device = device
+        self.scaler = scaler
         self.ticks_df = ticks_df
         self.model = model
-        self.tp_regressor = tp_regressor
-        self.scaler = joblib.load(
-            f"RL/timepoint_regressors/scalers/BayesianRidge_120_scaler.pkl"
-        )
+        self.guide = guide
+        self.clm = clm
         self._set_and_preprocess_test_analysis(test_analysis_df)
         self.metrics = {
             "profit": 0,
@@ -75,12 +75,15 @@ class RLStrategy(BaseStrategy):
         self.runner_number = None
 
         super_kwargs = kwargs.copy()
+        super_kwargs.pop("scaler", None)
+        super_kwargs.pop("guide", None)
         super_kwargs.pop("ticks_df", None)
         super_kwargs.pop("test_analysis_df", None)
         super_kwargs.pop("model", None)
-        super_kwargs.pop("tp_regressor", None)
+        super_kwargs.pop("clm", None)
         super_kwargs.pop("balance", None)
         super_kwargs.pop("green_enabled", None)
+        super_kwargs.pop("device", None)
         super().__init__(*args, **super_kwargs)
 
     def start(self) -> None:
@@ -90,9 +93,6 @@ class RLStrategy(BaseStrategy):
         test_analysis_df, test_analysis_df_y = preprocess_test_analysis(
             test_analysis_df
         )
-        test_analysis_df[
-            ["predicted_bsp", "lay", "back"]
-        ] = 0  # to match correct observations from env
         self.test_analysis_df = test_analysis_df
         self.test_analysis_df_y = test_analysis_df_y
 
@@ -120,8 +120,8 @@ class RLStrategy(BaseStrategy):
             .isin([runner.selection_id])
             .any()
             or not self.test_analysis_df["market_id"].isin([market_id]).any()
-            or runner.selection_id in self.back_bet_tracker[market_id].keys()
-            or runner.selection_id in self.lay_bet_tracker[market_id].keys()
+            # or runner.selection_id in self.back_bet_tracker[market_id].keys()
+            # or runner.selection_id in self.lay_bet_tracker[market_id].keys()
         ):
             return True
         return False
@@ -196,48 +196,69 @@ class RLStrategy(BaseStrategy):
         for runner in market_book.runners:
             if self._should_skip_runner(market_id=market_id, runner=runner):
                 continue
-            (action, mean_120, predicted_bsp) = self._get_action_and_features(
+            (
+                runner_predicted_bsp,
+                mean_120,
+                std_120,
+                vol_120,
+                RWoML_120,
+                RWoMB_120,
+            ) = self._get_model_prediction_and_features(
                 runner=runner, market_id=market_id
             )
-
-            if action == Actions.NOTHING.value:
+            print("predbsp")
+            print(runner_predicted_bsp)
+            if (
+                not mean_120
+                or not runner_predicted_bsp
+                or not std_120
+                or not vol_120
+                or not RWoML_120
+                or not RWoMB_120
+            ):
                 continue
 
-            side = "BACK" if action == Actions.BACK.value else "LAY"
+            (
+                back_price_adjusted,
+                back_confidence_price,
+                back_bsp_value,
+            ) = self._get_adjusted_prices(
+                market_id=market_id, runner=runner, mean_120=mean_120, side="BACK"
+            )
 
             (
-                price_adjusted,
-                confidence_price,
-                bsp_value,
+                lay_price_adjusted,
+                lay_confidence_price,
+                lay_bsp_value,
             ) = self._get_adjusted_prices(
-                market_id=market_id, runner=runner, mean_120=mean_120, side=side
+                market_id=market_id, runner=runner, mean_120=mean_120, side="LAY"
             )
 
             if (
-                action == Actions.LAY.value
-                and predicted_bsp > confidence_price
-                and price_adjusted <= self.max_stake
-                and runner.selection_id not in self.lay_bet_tracker[market_id].keys()
+                runner_predicted_bsp > lay_confidence_price
+                and lay_price_adjusted <= self.max_stake
+                and lay_price_adjusted > 1.1
+                # and runner.selection_id not in self.lay_bet_tracker[market_id].keys()
             ):
                 self._create_order(
                     market_id,
                     runner,
-                    price_adjusted,
-                    bsp_value,
+                    lay_price_adjusted,
+                    lay_bsp_value,
                     market,
                     side="LAY",
                 )
 
             if (
-                action == Actions.BACK.value
-                and predicted_bsp < confidence_price
-                and runner.selection_id not in self.back_bet_tracker[market_id].keys()
+                runner_predicted_bsp
+                < back_confidence_price
+                # and runner.selection_id not in self.back_bet_tracker[market_id].keys()
             ):
                 self._create_order(
                     market_id,
                     runner,
-                    price_adjusted,
-                    bsp_value,
+                    back_price_adjusted,
+                    back_bsp_value,
                     market,
                     side="BACK",
                 )
@@ -518,7 +539,6 @@ class RLStrategy(BaseStrategy):
         """
         tracker = self._get_tracker(side)
         matched_tracker = self._get_matched_tracker(side)
-
         tracker[market_id].setdefault(runner.selection_id, {})
         matched_tracker[market_id].setdefault(runner.selection_id, {})
         trade = Trade(
@@ -543,6 +563,10 @@ class RLStrategy(BaseStrategy):
         print(
             f"{side} order created at {self.seconds_to_start}: \n\tmarket id {market_id} \n\tmarket {market} \n\trunner {runner} \n\tprice adjusted {price_adjusted} \n\tbsp_value {bsp_value} \n\tOrder size: {stake}"
         )
+
+        # Get trackers based on order side
+        tracker = self._get_tracker(side)
+        matched_tracker = self._get_matched_tracker(side)
 
         tracker[market_id][runner.selection_id] = [
             order,
@@ -579,7 +603,7 @@ class RLStrategy(BaseStrategy):
             "number"
         ]
         number_adjust = number
-        confidence_number = number + 9 if side == "LAY" else number - 2
+        confidence_number = number + 12 if side == "LAY" else number - 4
         confidence_price = self.ticks_df.iloc[
             self.ticks_df["number"].sub(confidence_number).abs().idxmin()
         ]["tick"]
@@ -622,7 +646,7 @@ class RLStrategy(BaseStrategy):
             else self.matched_lay_bet_tracker
         )
 
-    def _get_action_and_features(
+    def _get_model_prediction_and_features(
         self, runner: RunnerBook, market_id: float
     ) -> Tuple[np.float64, np.float64]:
         predict_row = self.test_analysis_df.loc[
@@ -630,41 +654,34 @@ class RLStrategy(BaseStrategy):
             & (self.test_analysis_df["market_id"] == market_id)
         ]
         mean_120 = predict_row["mean_120"].values[0]
+        std_120 = predict_row["std_120"].values[0]
+        vol_120 = predict_row["volume_120"].values[0]
+        RWoML_120 = predict_row["RWoML_120"].values[0]
+        RWoMB_120 = predict_row["RWoMB_120"].values[0]
 
         predict_row = predict_row.drop(
             ["Unnamed: 0", "market_id", "bsps", "selection_ids"], axis=1
         )
-        regressor_predict_row = predict_row.copy(deep=True)
-        regressor_predict_row = regressor_predict_row.drop(
-            ["predicted_bsp", "lay", "back"], axis=1
-        )
-        columns = regressor_predict_row.columns
+        predict_row = pd.DataFrame(self.scaler.transform(predict_row), columns=self.clm)
 
-        regressor_predict_row = pd.DataFrame(
-            self.scaler.transform(regressor_predict_row),
-            columns=columns,
-        )
-        predicted_bsp = self.tp_regressor.predict(regressor_predict_row)
-        predicted_bsp = (
-            predicted_bsp[0] if isinstance(predicted_bsp, np.ndarray) else predicted_bsp
-        )
-        # Reinforcement Learning Prediction
-        predict_row = predict_row.filter(
-            [
-                "mean_120",
-                "std_120",
-                "volume_120",
-                "RWoML_120",
-                "RWoMB_120",
-                "predicted_bsp",
-                "back",
-                "lay",
-            ]
-        )
-        predict_row["predicted_bsp"] = predicted_bsp
+        # Convert the predict_row DataFrame to a PyTorch tensor and move it to the device
+        predict_tensor = torch.tensor(predict_row.values).float().to(self.device)
+        print("pred_tensor", predict_tensor)
 
-        action, _ = self.model.predict(predict_row.to_numpy())
-        action = action[0] if isinstance(action, np.ndarray) else action
-        print("pred", predicted_bsp, "action", action)
+        # Get predictions from the trained guide using pyro.infer.Predictive  return_sites=("obs", "_RETURN")
+        predictive = Predictive(
+            self.br,
+            guide=self.guide,
+            num_samples=1000,
+        )
+        with torch.no_grad():
+            samples = predictive(predict_tensor)
+            print("samples", samples)
 
-        return action, mean_120, predicted_bsp
+        predictions = samples["_RETURN"]
+        print("predictions", predictions, samples["obs"])
+
+        # Compute the mean of the predictions and convert it back to a NumPy array
+        runner_predicted_bsp = predictions.mean(0).cpu().numpy()[0]
+
+        return runner_predicted_bsp, mean_120, std_120, vol_120, RWoML_120, RWoMB_120

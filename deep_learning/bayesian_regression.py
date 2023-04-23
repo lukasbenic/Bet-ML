@@ -2,12 +2,9 @@ import pandas as pd
 import pyro
 import pyro.distributions as dist
 import torch
-import pyro.optim as optim
-from pyro.infer import SVI, Trace_ELBO
-import pyro.contrib.autoguide as autoguide
 from torch.utils.data import TensorDataset, DataLoader
 import pyro.nn as pnn
-from pyro.infer.autoguide import AutoDiagonalNormal
+from sklearn.preprocessing import StandardScaler
 
 
 class RegressionModel(pnn.PyroModule):
@@ -33,12 +30,9 @@ class BayesianRegressionModel(pnn.PyroModule):
 
     def forward(self, x, y=None):
         sigma = pyro.sample("sigma", dist.Uniform(0.0, 10.0))
-        mean = (
-            self.linear(x).squeeze(-1).unsqueeze(-1)
-        )  # Add unsqueeze operation to mean
-        sigma = sigma.unsqueeze(-1)  # Add unsqueeze operation to sigma
+        mean = self.linear(x).squeeze(-1)
         with pyro.plate("data", x.shape[0]):
-            obs = pyro.sample("obs", dist.Normal(mean, sigma).to_event(0), obs=y)
+            obs = pyro.sample("obs", dist.Normal(mean, sigma), obs=y)
         return mean
 
 
@@ -90,42 +84,6 @@ class BayesianRegressionModel2(pnn.PyroModule):
 
     def forward(self, x):
         return self.linear(x).squeeze(-1)
-
-
-def prepare_data(x_train_path, y_train_path):
-    x_train_df = pd.read_csv(x_train_path)
-    y_train_df = pd.read_csv(y_train_path)
-
-    x_train_tensor = torch.tensor(x_train_df.values).float()
-    y_train_tensor = torch.tensor(y_train_df.values).float()
-    # y_train_tensor = y_train_tensor.unsqueeze(
-    #     -1
-    # )  # Add an extra dimension to match the output shape
-    return x_train_tensor, y_train_tensor
-
-
-def train_bayesian_regression(
-    svi, x_train_tensor, y_train_tensor, batch_size, num_epochs
-):
-    train_dataset = TensorDataset(x_train_tensor, y_train_tensor)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-
-    losses = []
-    for epoch in range(num_epochs):
-        # Compute the ELBO loss for this mini-batch
-
-        loss = svi.step(x_train_tensor, y_train_tensor)
-
-        normalized_loss = loss / x_train_tensor.shape[0]
-
-        # Tabulate the loss for plotting
-        losses.append(normalized_loss)
-        if epoch % 250 == 0:
-            print(f"iter: {epoch}, normalized loss:{round(normalized_loss,2)}")
-
-    # Return the trained model
-    trained_model = svi.guide
-    return trained_model
 
 
 def model_gamma2(X, y):
