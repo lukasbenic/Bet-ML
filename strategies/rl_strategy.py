@@ -215,7 +215,7 @@ class RLStrategy(BaseStrategy):
 
             if (
                 action == Actions.LAY.value
-                and predicted_bsp > confidence_price
+                # and predicted_bsp > confidence_price
                 and price_adjusted <= self.max_stake
                 and runner.selection_id not in self.lay_bet_tracker[market_id].keys()
             ):
@@ -230,7 +230,7 @@ class RLStrategy(BaseStrategy):
 
             if (
                 action == Actions.BACK.value
-                and predicted_bsp < confidence_price
+                # and predicted_bsp < confidence_price
                 and runner.selection_id not in self.back_bet_tracker[market_id].keys()
             ):
                 self._create_order(
@@ -579,7 +579,7 @@ class RLStrategy(BaseStrategy):
             "number"
         ]
         number_adjust = number
-        confidence_number = number + 9 if side == "LAY" else number - 2
+        confidence_number = number + 8 if side == "LAY" else number - 4
         confidence_price = self.ticks_df.iloc[
             self.ticks_df["number"].sub(confidence_number).abs().idxmin()
         ]["tick"]

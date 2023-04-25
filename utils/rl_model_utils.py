@@ -292,3 +292,30 @@ def test_models(
         test_metrics_df.index = test_metrics_df.index.astype(int)
         test_metrics_df.sort_index(inplace=True)
         test_metrics_df.to_csv(f"{save_path}/test_metrics.csv", index_label="Regressor")
+
+
+def save_rolling_rewards(
+    file_path: str = "RL/PPO/PPO_BayesianRidge/monitor.csv",
+    min_periods=False,
+    save_path: str = "RL/PPO/PPO_BayesianRidge/rolling_rewards.csv",
+):
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+
+    # Clean the data and create a dataframe
+    data = [line.strip().split(",") for line in lines if not line.startswith("#")]
+    df = pd.DataFrame(data, columns=["r", "l", "t"])
+    df.drop(0, inplace=True)
+    print(df)
+    # Transpose the dataframe and reset the index
+    df_t = df.transpose().set_index(df.columns)
+    rewards = pd.Series(df_t.loc["r"].astype(float))
+
+    if min_periods:
+        rolling_rewards = rewards.rolling(window=200, min_periods=1).mean()
+    else:
+        rolling_rewards = rewards.rolling(window=200).mean()
+
+    rolling_rewards = rolling_rewards.dropna()
+    # Optional: Save the rolling_rewards to a new CSV file
+    rolling_rewards.to_frame().T.to_csv(save_path, index=False)

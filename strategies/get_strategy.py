@@ -70,7 +70,7 @@ def get_strategy(
         )
     if strategy == "RLStrategy":
         models = model_name.split("_")
-        rl_agent = PPO.load(f"RL/{models[0]}/{model_name}/{model_name}_model")
+        rl_agent = PPO.load(f"RL/{models[0]}/{model_name}/{model_name}_model_4_3")
         tp_regressor = joblib.load(
             f"RL/timepoint_regressors/models/{models[1]}_120.pkl"
         )

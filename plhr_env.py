@@ -27,6 +27,7 @@ from utils.rl_model_utils import (
     get_timepoints,
     get_timesteps,
     get_tp_regressors,
+    save_rolling_rewards,
 )
 
 from utils.config import app_principal, SITE_URL
@@ -78,7 +79,11 @@ class PreLiveHorseRaceEnv(gym.Env):
         predicted_bsp = self._predict(observation)
 
         side = (
-            "back" if action == Actions.BACK else "lay" if action == Actions.LAY else ""
+            "back"
+            if action == Actions.BACK.value
+            else "lay"
+            if action == Actions.LAY.value
+            else ""
         )
 
         self._make_bet(side, bsp, predicted_bsp, observation)
@@ -117,7 +122,7 @@ class PreLiveHorseRaceEnv(gym.Env):
             scaler.transform(observation_df), columns=relevant_cols
         )
 
-        predicted_bsp = regressor.predict(observation_scaled)
+        predicted_bsp = regressor.predict(observation_scaled)[0]
 
         observation[-3] = predicted_bsp
         return predicted_bsp
@@ -134,7 +139,7 @@ class PreLiveHorseRaceEnv(gym.Env):
             margin = calculate_margin(side.upper(), stake, price_adjusted, bsp)
 
             # need to check if bet has already been made as self._is_done only
-            # terminates when both back and lay has been order placed
+
             if (
                 side == "back"
                 and predicted_bsp < confidence_price
@@ -169,6 +174,8 @@ class PreLiveHorseRaceEnv(gym.Env):
         mean = observation[0]
         reward = 0
         if done:
+            # maybe see what happens when we don't set a final bet?
+
             # Back set to mean_120
             if observation[-1] == 0:
                 observation[-1] = mean
@@ -222,7 +229,9 @@ class PreLiveHorseRaceEnv(gym.Env):
             "number"
         ]
         number_adjust = number
-        confidence_number = number + 7 if side == "lay" else number - 2
+        # 10 7 hex
+        # 8 4 here
+        confidence_number = number - 5 if side == "lay" else number + 1
         confidence_price = self.ticks_df.iloc[
             self.ticks_df["number"].sub(confidence_number).abs().idxmin()
         ]["tick"]
@@ -384,7 +393,6 @@ def train_model2(
     log_dir_eval = f"RL/{rl_model_name}/{rl_model_name}_{tpr_name}/eval"
 
     env = Monitor(env, f"{log_dir_train}/train_monitor.csv")
-    eval_env = Monitor(eval_env, f"{log_dir_eval}/eval_monitor.csv")
 
     model = model_class(
         "MlpPolicy",
@@ -396,19 +404,23 @@ def train_model2(
     callback_max_ep = StopTrainingOnMaxEpisodes(
         max_episodes=(len(env.X) - 1), verbose=1
     )
-    eval_callback = EvalCallback(
-        eval_env,
-        best_model_save_path=f"{log_dir_eval}/best_model/",
-        log_path=f"{log_dir_eval}/eval_log/",
-        eval_freq=500,
-        callback_after_eval=callback_max_ep,
-        n_eval_episodes=5,
-        deterministic=True,
-        render=False,
-    )
+    if eval_env:
+        eval_env = Monitor(eval_env, f"{log_dir_eval}/eval_monitor.csv")
+        eval_callback = EvalCallback(
+            eval_env,
+            best_model_save_path=f"{log_dir_eval}/best_model/",
+            log_path=f"{log_dir_eval}/eval_log/",
+            eval_freq=500,
+            callback_after_eval=callback_max_ep,
+            n_eval_episodes=5,
+            deterministic=True,
+            render=False,
+        )
 
     # Combine the callbacks using CallbackList
-    callback_list = CallbackList([callback_max_ep, eval_callback])
+    callback_list = (
+        CallbackList([callback_max_ep, eval_callback]) if eval_env else callback_max_ep
+    )
     trained_model = model.learn(
         total_timesteps=env.timesteps,
         callback=callback_list,
@@ -507,7 +519,11 @@ if __name__ == "__main__":
 
     tp_regressors = get_tp_regressors(X_regressors, y_regressors, args.tp_regressors)
     env = PreLiveHorseRaceEnv(X_rl, y_rl, tp_regressors, ticks_df)
-    eval_env = PreLiveHorseRaceEnv(X_rl, y_rl, tp_regressors, ticks_df)
-    model = train_model2(args.rl_model, args.tp_regressors, env, eval_env)
+    # eval_env = PreLiveHorseRaceEnv(X_rl, y_rl, tp_regressors, ticks_df)
+    model = train_model2(args.rl_model, args.tp_regressors, env)
 
     # train_optimize_model("PPO", X_rl, y_rl, args.tp_regressors, tp_regressors, ticks_df)
+    # save_rolling_rewards(
+    #     file_path="RL/PPO/PPO_BayesianRidge/train_monitor_2_1.csv",
+    #     save_path="RL/PPO/PPO_BayesianRidge/train_monitor_rolling_2_1.csv",
+    # )
