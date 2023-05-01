@@ -206,7 +206,7 @@ class RLStrategy(BaseStrategy):
         market_id = float(market_book.market_id)
         self._set_market_id(market_id)
 
-        timepoints = TIMEPOINTS[0:3]
+        timepoints = TIMEPOINTS
         timepoint = min(
             (tp for tp in timepoints if tp >= self.seconds_to_start), default=None
         )
@@ -245,7 +245,7 @@ class RLStrategy(BaseStrategy):
                 self.timepoint_preds[market_id][runner.selection_id][timepoint] = action
 
             action = self.timepoint_preds[market_id][runner.selection_id][timepoint]
-
+            print(action)
             if action == Actions.NOTHING.value:
                 continue
 
@@ -350,7 +350,7 @@ class RLStrategy(BaseStrategy):
         # print("order", order.size_matched, "margin", margin, "gambled", gambled)
         # here [0:8] -- hex all
         timepoint = min(
-            (tp for tp in TIMEPOINTS[0:3] if tp >= self.seconds_to_start), default=None
+            (tp for tp in TIMEPOINTS if tp >= self.seconds_to_start), default=None
         )
 
         # Order has been fully matched
@@ -614,7 +614,7 @@ class RLStrategy(BaseStrategy):
             "number"
         ]
         number_adjust = number
-        confidence_number = number + 2 if side == "LAY" else number - 2
+        confidence_number = number - 2 if side == "LAY" else number + 2
         confidence_price = self.ticks_df.iloc[
             self.ticks_df["number"].sub(confidence_number).abs().idxmin()
         ]["tick"]

@@ -28,6 +28,7 @@ from utils.rl_model_utils import (
     get_timesteps,
     get_tp_regressors,
     save_rolling_rewards,
+    save_timesteps,
 )
 
 from utils.config import app_principal, SITE_URL
@@ -265,7 +266,7 @@ class PreLiveHorseRaceEnv(gym.Env):
         ]
         number_adjust = number
         # +7 -4 hex
-        confidence_number = number + 7 if side == "lay" else number - 4
+        confidence_number = number + 10 if side == "lay" else number - 3
         confidence_price = self.ticks_df.iloc[
             self.ticks_df["number"].sub(confidence_number).abs().idxmin()
         ]["tick"]
@@ -276,7 +277,7 @@ class PreLiveHorseRaceEnv(gym.Env):
         return price_adjusted, confidence_price
 
 
-def create_model(model_name: str, env, device):
+def create_model(model_name: str, env, device, policy_kwargs):
     model_class = {
         "ppo": PPO,
         "rppo": RecurrentPPO,
@@ -292,6 +293,7 @@ def create_model(model_name: str, env, device):
             verbose=1,
             seed=42,
             device=device,
+            policy_kwargs=policy_kwargs,
         )
         return model
 
@@ -403,14 +405,15 @@ def train_optimize_model(
     )
 
 
-from stable_baselines3.common.monitor import Monitor
-
-
 def train_model2(
     rl_model_name: str,
     tpr_name: str,
     env: PreLiveHorseRaceEnv,
     eval_env: PreLiveHorseRaceEnv = None,
+    policy_kwargs=dict(
+        activation_fn=torch.nn.ReLU,
+        net_arch=dict(pi=[128, 128, 128], vf=[128, 128, 128]),
+    ),
     save: bool = True,
     saved_model_path="",
 ):
@@ -452,7 +455,7 @@ def train_model2(
             f"RL/{rl_model_name}/{rl_model_name}_{tpr_name}/{rl_model_name}_{tpr_name}_model_{saved_model_path}"
         )
         if saved_model_path
-        else create_model(rl_model_name, env, device)
+        else create_model(rl_model_name, env, device, policy_kwargs=policy_kwargs)
     )
     if saved_model_path:
         model.set_env(env)
@@ -522,7 +525,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--rl_model",
         type=str,
-        default="RPPO",
+        default="PPO",
         help="RL algorithm to use.",
     )
     parser.add_argument(
@@ -554,12 +557,10 @@ if __name__ == "__main__":
     tp_regressors = get_tp_regressors(X_regressors, y_regressors, args.tp_regressors)
     env = PreLiveHorseRaceEnv(X_rl, y_rl, tp_regressors, ticks_df)
     # eval_env = PreLiveHorseRaceEnv(X_rl, y_rl, tp_regressors, ticks_df)
-    model = train_model2(
-        args.rl_model, args.tp_regressors, env, saved_model_path="+7_-4"
-    )
+    model = train_model2(args.rl_model, args.tp_regressors, env)
 
     # train_optimize_model("PPO", X_rl, y_rl, args.tp_regressors, tp_regressors, ticks_df)
     # save_rolling_rewards(
-    #     file_path="RL/PPO/PPO_BayesianRidge/train_monitor_2_+4_-3.csv",
-    #     save_path="RL/PPO/PPO_BayesianRidge/train_monitor_rolling_2_+4_-3.csv",
+    #     file_path="RL/PPO/PPO_BayesianRidge/train_monitor_128_-2_+2.csv",
+    #     save_path="RL/PPO/PPO_BayesianRidge/train_monitor_rolling_128_-2_+2.csv",
     # )
