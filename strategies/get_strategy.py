@@ -17,6 +17,8 @@ from pyro.infer.autoguide import AutoDiagonalNormal, AutoMultivariateNormal
 
 import torch
 
+from utils.rl_model_utils import load_model
+
 
 def get_strategy(
     strategy: str,
@@ -69,15 +71,9 @@ def get_strategy(
             max_selection_exposure=100000,
         )
     if strategy == "RLStrategy":
-        models = model_name.split("_")
-        rl_agent = PPO.load(f"RL/{models[0]}/{model_name}/{model_name}_model_4_3")
-        tp_regressor = joblib.load(
-            f"RL/timepoint_regressors/models/{models[1]}_120.pkl"
-        )
-        # tp_regressor = joblib.load(f"models/BayesianRidge.pkl")
         strategy_pick = RLStrategy(
-            model=rl_agent,
-            tp_regressor=tp_regressor,
+            model_name=model_name,
+            # tp_regressor=tp_regressor,
             ticks_df=ticks_df,
             balance=balance,
             test_analysis_df=test_analysis_df,

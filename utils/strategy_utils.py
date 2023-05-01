@@ -207,7 +207,6 @@ def calculate_stake(stake: float, price_adjusted: float, side: str) -> float:
     return stake
 
 
-
 def kelly_stake(p, odds, bankroll):
     """
     Calculate the optimal bet size using the Kelly criterion.
@@ -322,13 +321,16 @@ def calculate_gambled(side: str, size_matched: float, price: float) -> float:
     Returns:
         float: The green amount gambled.
     """
+    size_matched = 0 if not size_matched else size_matched
     if side == "BACK":
         return size_matched
     else:
         return size_matched * (price - 1)
 
 
-def calculate_margin(side: str, size: float, price: float, bsp_value: float) -> float:
+def calculate_margin(
+    side: str, size: float, price: np.float64, bsp_value: float
+) -> float:
     """
     Calculates the margin of the bet based on the side, size, price and BSP value.
 
@@ -341,6 +343,8 @@ def calculate_margin(side: str, size: float, price: float, bsp_value: float) -> 
     Returns:
         float: The margin of the bet.
     """
+    # if price == 0:
+    #     return 0
     if side == "BACK":
         return size * (price - bsp_value) / price
     else:

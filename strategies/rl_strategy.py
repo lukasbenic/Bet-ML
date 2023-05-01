@@ -16,7 +16,12 @@ from flumine.markets.market import Market
 from betfairlightweight.resources import MarketBook, RunnerBook
 from stable_baselines3 import PPO
 from plhr_env import Actions
-from utils.constants import TIME_BEFORE_START
+from utils.constants import TIME_BEFORE_START, TIMEPOINTS
+from utils.rl_model_utils import (
+    get_sorted_columns,
+    get_tp_regressor_on_timepoint,
+    load_model,
+)
 from utils.strategy_utils import (
     calculate_gambled,
     calculate_margin,
@@ -32,18 +37,19 @@ class RLStrategy(BaseStrategy):
         ticks_df: pd.DataFrame,
         test_analysis_df: pd.DataFrame,
         balance,
-        model,
-        tp_regressor,
+        model_name,
+        # tp_regressor,
         green_enabled=False,
         *args,
         **kwargs,
     ):
+        self.states = {}
         self.ticks_df = ticks_df
-        self.model = model
-        self.tp_regressor = tp_regressor
-        self.scaler = joblib.load(
-            f"RL/timepoint_regressors/scalers/BayesianRidge_120_scaler.pkl"
-        )
+        self.model_name = model_name
+        # self.tp_regressor = tp_regressor
+        # self.scaler = joblib.load(
+        #     f"RL/timepoint_regressors/scalers/BayesianRidge_120_scaler.pkl"
+        # )
         self._set_and_preprocess_test_analysis(test_analysis_df)
         self.metrics = {
             "profit": 0,
@@ -62,7 +68,6 @@ class RLStrategy(BaseStrategy):
             "q_margin": 0,
         }
         self.green_enabled = green_enabled
-        self.regression = True
         self.balance = balance
         self.back_bet_tracker = {}
         self.matched_back_bet_tracker = {}
@@ -73,12 +78,13 @@ class RLStrategy(BaseStrategy):
         self.max_stake = self.balance * 0.08
         self.first_nonrunners = True
         self.runner_number = None
-
+        self.selection_id_models = {}
+        self.timepoint_preds = {}
         super_kwargs = kwargs.copy()
         super_kwargs.pop("ticks_df", None)
         super_kwargs.pop("test_analysis_df", None)
-        super_kwargs.pop("model", None)
-        super_kwargs.pop("tp_regressor", None)
+        super_kwargs.pop("model_name", None)
+        # super_kwargs.pop("tp_regressor", None)
         super_kwargs.pop("balance", None)
         super_kwargs.pop("green_enabled", None)
         super().__init__(*args, **super_kwargs)
@@ -90,19 +96,29 @@ class RLStrategy(BaseStrategy):
         test_analysis_df, test_analysis_df_y = preprocess_test_analysis(
             test_analysis_df
         )
-        test_analysis_df[
-            ["predicted_bsp", "lay", "back"]
-        ] = 0  # to match correct observations from env
+        # test_analysis_df[
+        #     ["predicted_bsp", "lay", "back"]
+        # ] = 0  # to match correct observations from env
         self.test_analysis_df = test_analysis_df
         self.test_analysis_df_y = test_analysis_df_y
 
-    def _set_market_id_bet_trackers(self, market_id: float):
+    def _set_market_id(self, market_id: float):
         if market_id not in self.back_bet_tracker.keys():
             self.back_bet_tracker[market_id] = {}
             self.matched_back_bet_tracker[market_id] = {}
+
         if market_id not in self.lay_bet_tracker.keys():
             self.lay_bet_tracker[market_id] = {}
             self.matched_lay_bet_tracker[market_id] = {}
+
+        if market_id not in self.states.keys():
+            self.states[market_id] = {}
+
+        if market_id not in self.timepoint_preds.keys():
+            self.timepoint_preds[market_id] = {}
+
+        if market_id not in self.selection_id_models.keys():
+            self.selection_id_models[market_id] = {}
 
     def _should_skip_runner(self, market_id: float, runner: RunnerBook):
         """Determines whether or not to skip processing a runner based on various conditions.
@@ -120,8 +136,12 @@ class RLStrategy(BaseStrategy):
             .isin([runner.selection_id])
             .any()
             or not self.test_analysis_df["market_id"].isin([market_id]).any()
-            or runner.selection_id in self.back_bet_tracker[market_id].keys()
-            or runner.selection_id in self.lay_bet_tracker[market_id].keys()
+            or (
+                self.matched_back_bet_tracker[market_id].get(runner.selection_id, False)
+                and self.matched_lay_bet_tracker[market_id].get(
+                    runner.selection_id, False
+                )
+            )
         ):
             return True
         return False
@@ -184,21 +204,47 @@ class RLStrategy(BaseStrategy):
             None
         """
         market_id = float(market_book.market_id)
-        self._set_market_id_bet_trackers(market_id)
+        self._set_market_id(market_id)
 
-        if not (
-            self.seconds_to_start > 100
-            and self.seconds_to_start < 120
-            # and market_book.inplay  # maybe keep this
-        ):
+        timepoints = TIMEPOINTS[0:3]
+        timepoint = min(
+            (tp for tp in timepoints if tp >= self.seconds_to_start), default=None
+        )
+
+        trade_window = timepoint - self.seconds_to_start
+        if (
+            self.seconds_to_start < timepoints[0] - 10
+            or self.seconds_to_start > timepoints[-1]
+        ) or not (0.00 < trade_window < 10.00):
             return
 
         for runner in market_book.runners:
             if self._should_skip_runner(market_id=market_id, runner=runner):
                 continue
-            (action, mean_120, predicted_bsp) = self._get_action_and_features(
-                runner=runner, market_id=market_id
-            )
+
+            if runner.selection_id not in self.selection_id_models[market_id].keys():
+                self.selection_id_models[market_id][runner.selection_id] = load_model(
+                    self.model_name
+                )
+
+            if runner.selection_id not in self.states[market_id].keys():
+                self.states[market_id][runner.selection_id] = None
+
+            mean = self._get_timepoint_mean(runner.selection_id, market_id, timepoint)
+            bsp = self._get_bsp(runner.selection_id, market_id)
+
+            if runner.selection_id not in self.timepoint_preds[market_id].keys():
+                self.timepoint_preds[market_id][runner.selection_id] = {}
+            if (
+                timepoint
+                not in self.timepoint_preds[market_id][runner.selection_id].keys()
+            ):
+                (action, predicted_bsp) = self._get_action_and_features(
+                    runner, market_id, timepoint, bsp
+                )
+                self.timepoint_preds[market_id][runner.selection_id][timepoint] = action
+
+            action = self.timepoint_preds[market_id][runner.selection_id][timepoint]
 
             if action == Actions.NOTHING.value:
                 continue
@@ -208,22 +254,22 @@ class RLStrategy(BaseStrategy):
             (
                 price_adjusted,
                 confidence_price,
-                bsp_value,
-            ) = self._get_adjusted_prices(
-                market_id=market_id, runner=runner, mean_120=mean_120, side=side
-            )
+            ) = self._get_adjusted_prices(mean=mean, side=side)
 
             if (
                 action == Actions.LAY.value
                 # and predicted_bsp > confidence_price
                 and price_adjusted <= self.max_stake
-                and runner.selection_id not in self.lay_bet_tracker[market_id].keys()
+                and not self.matched_lay_bet_tracker[market_id].get(
+                    runner.selection_id, False
+                )
+                and runner.selection_id not in self.lay_bet_tracker[market_id]
             ):
                 self._create_order(
                     market_id,
                     runner,
                     price_adjusted,
-                    bsp_value,
+                    bsp,
                     market,
                     side="LAY",
                 )
@@ -231,13 +277,16 @@ class RLStrategy(BaseStrategy):
             if (
                 action == Actions.BACK.value
                 # and predicted_bsp < confidence_price
-                and runner.selection_id not in self.back_bet_tracker[market_id].keys()
+                and not self.matched_back_bet_tracker[market_id].get(
+                    runner.selection_id, False
+                )
+                and runner.selection_id not in self.back_bet_tracker[market_id]
             ):
                 self._create_order(
                     market_id,
                     runner,
                     price_adjusted,
-                    bsp_value,
+                    bsp,
                     market,
                     side="BACK",
                 )
@@ -299,6 +348,10 @@ class RLStrategy(BaseStrategy):
         margin = calculate_margin(side, order.size_matched, price, bsp_value)
         gambled = calculate_gambled(side, order.size_matched, price)
         # print("order", order.size_matched, "margin", margin, "gambled", gambled)
+        # here [0:8] -- hex all
+        timepoint = min(
+            (tp for tp in TIMEPOINTS[0:3] if tp >= self.seconds_to_start), default=None
+        )
 
         # Order has been fully matched
         if order.status == OrderStatus.EXECUTION_COMPLETE:
@@ -324,8 +377,8 @@ class RLStrategy(BaseStrategy):
         elif (
             order.status == OrderStatus.EXECUTABLE
             and order.size_matched > 0
-            and self.seconds_to_start < TIME_BEFORE_START
-            # and not matched_tracker[market_id][selection_id]
+            and self.seconds_to_start <= timepoint - 10
+            and not matched_tracker[market_id].get(selection_id, False)
         ):
             self.metrics["amount_gambled"] += gambled
             self._update_metrics(
@@ -333,7 +386,17 @@ class RLStrategy(BaseStrategy):
             )
             market.cancel_order(order)
             matched_tracker[market_id][selection_id] = True
-            print(f"Order cancelled: {order}")
+            print(
+                f"Partially Matched Order Cancelled: {order} at {self.seconds_to_start} seconds_to_start and tp {timepoint}"
+            )
+
+        elif order.size_matched == 0 and self.seconds_to_start <= timepoint - 10:
+            market.cancel_order(order)
+            print(
+                f"Order Cancelled: {order} at {self.seconds_to_start} seconds_to_start and tp {timepoint}"
+            )
+            del tracker[market_id][selection_id]
+            matched_tracker[market_id][selection_id] = False
 
     def _process_matched_order(
         self,
@@ -370,8 +433,9 @@ class RLStrategy(BaseStrategy):
         Returns:
             None
         """
-
-        if (order.size_matched >= 10.00 and side == "BACK") or (
+        if side == "BACK":
+            print("back_size_matched", order.size_matched)
+        if (order.size_matched > 10.00 and side == "BACK") or (
             order.size_matched > 1 and side == "LAY"
         ):
             print(
@@ -467,32 +531,6 @@ class RLStrategy(BaseStrategy):
         self.balance = self.balance + margin
         print("Balance is now", self.balance)
 
-    def _should_skip_runner(self, market_id: str, runner: RunnerBook) -> bool:
-        """
-        Determine whether a runner should be skipped based on its status and whether it
-        has been previously processed or bet on.
-
-        Args:
-            market_id (str): The ID of the market the runner is in.
-            runner (RunnerBook): The runner to check.
-
-        Returns:
-            bool: True if the runner should be skipped, False otherwise.
-        """
-        if (
-            not runner.status == "ACTIVE"
-            # or runner.selection_id in self.prediction_status_tracker[market_id]
-            or not self.test_analysis_df["selection_ids"]
-            .isin([runner.selection_id])
-            .any()
-            or not self.test_analysis_df["market_id"].isin([market_id]).any()
-            # ONLY ONE BET/PREDICTION FOR EACH RUNNER IN EACH MARKET MAX
-            or runner.selection_id in self.back_bet_tracker[market_id].keys()
-            or runner.selection_id in self.lay_bet_tracker[market_id].keys()
-        ):
-            return True
-        return False
-
     def _create_order(
         self,
         market_id: float,
@@ -518,7 +556,7 @@ class RLStrategy(BaseStrategy):
         """
         tracker = self._get_tracker(side)
         matched_tracker = self._get_matched_tracker(side)
-
+        print("made")
         tracker[market_id].setdefault(runner.selection_id, {})
         matched_tracker[market_id].setdefault(runner.selection_id, {})
         trade = Trade(
@@ -553,7 +591,6 @@ class RLStrategy(BaseStrategy):
             runner.sp.actual_sp,
             price_adjusted,
         ]
-
         matched_tracker[market_id][runner.selection_id] = False
         market.place_order(order)
         margin = calculate_margin(side, stake, price_adjusted, bsp_value)
@@ -561,38 +598,31 @@ class RLStrategy(BaseStrategy):
 
     def _get_adjusted_prices(
         self,
-        mean_120: np.float64,
-        runner: RunnerBook,
-        market_id: float,
+        mean: np.float64,
         side: str,
-    ) -> Tuple[np.float64, np.float64, np.float64]:
+    ) -> Tuple[np.float64, np.float64]:
         """
         Calculate adjusted prices for back and lay bets along with the BSP value.
 
         :param test_analysis_df_y: A DataFrame containing the test analysis data
-        :param mean_120: The mean_120 value for the current runner
+        :param mean: The mean value for the current runner at the current timepoint
         :param runner: The current RunnerBook object
         :param market_id: The market ID for the current market
         :return: A tuple containing the adjusted price, confidence price, and BSP value
         """
-        number = self.ticks_df.iloc[self.ticks_df["tick"].sub(mean_120).abs().idxmin()][
+        number = self.ticks_df.iloc[self.ticks_df["tick"].sub(mean).abs().idxmin()][
             "number"
         ]
         number_adjust = number
-        confidence_number = number + 8 if side == "LAY" else number - 4
+        confidence_number = number + 2 if side == "LAY" else number - 2
         confidence_price = self.ticks_df.iloc[
             self.ticks_df["number"].sub(confidence_number).abs().idxmin()
         ]["tick"]
         price_adjusted = self.ticks_df.iloc[
             self.ticks_df["number"].sub(number_adjust).abs().idxmin()
         ]["tick"]
-        bsp_row = self.test_analysis_df_y.loc[
-            (self.test_analysis_df_y["selection_ids"] == runner.selection_id)
-            & (self.test_analysis_df_y["market_id"] == market_id)
-        ]
-        bsp_value = bsp_row["bsps"].values[0]
 
-        return price_adjusted, confidence_price, bsp_value
+        return price_adjusted, confidence_price
 
     def _get_tracker(self, side: str) -> Dict[str, Dict[str, list]]:
         """
@@ -622,49 +652,126 @@ class RLStrategy(BaseStrategy):
             else self.matched_lay_bet_tracker
         )
 
+    def _get_timepoint_mean(self, selection_id, market_id, timepoint):
+        row = self.test_analysis_df.loc[
+            (self.test_analysis_df["selection_ids"] == selection_id)
+            & (self.test_analysis_df["market_id"] == market_id)
+        ]
+
+        mean = row[f"mean_{timepoint}"].values[0]
+        return mean
+
+    def _get_bsp(self, selection_id, market_id):
+        row = self.test_analysis_df.loc[
+            (self.test_analysis_df["selection_ids"] == selection_id)
+            & (self.test_analysis_df["market_id"] == market_id)
+        ]
+
+        bsp = row["bsps"].values[0]
+        return bsp
+
     def _get_action_and_features(
-        self, runner: RunnerBook, market_id: float
+        self, runner: RunnerBook, market_id: float, timepoint: int, bsp
     ) -> Tuple[np.float64, np.float64]:
+        regressor, scaler = get_tp_regressor_on_timepoint(timepoint)
+
         predict_row = self.test_analysis_df.loc[
             (self.test_analysis_df["selection_ids"] == runner.selection_id)
             & (self.test_analysis_df["market_id"] == market_id)
-        ]
-        mean_120 = predict_row["mean_120"].values[0]
-
+        ].copy()
         predict_row = predict_row.drop(
             ["Unnamed: 0", "market_id", "bsps", "selection_ids"], axis=1
         )
-        regressor_predict_row = predict_row.copy(deep=True)
-        regressor_predict_row = regressor_predict_row.drop(
-            ["predicted_bsp", "lay", "back"], axis=1
-        )
-        columns = regressor_predict_row.columns
+        relevant_cols = get_sorted_columns(predict_row.columns, str(timepoint))
+        predict_row = predict_row[relevant_cols]
+        observation_df = predict_row.iloc[:, :5].copy()
 
-        regressor_predict_row = pd.DataFrame(
-            self.scaler.transform(regressor_predict_row),
-            columns=columns,
+        predict_row = pd.DataFrame(
+            scaler.transform(predict_row),
+            columns=relevant_cols,
         )
-        predicted_bsp = self.tp_regressor.predict(regressor_predict_row)
+        predicted_bsp = regressor.predict(predict_row)
         predicted_bsp = (
             predicted_bsp[0] if isinstance(predicted_bsp, np.ndarray) else predicted_bsp
         )
-        # Reinforcement Learning Prediction
-        predict_row = predict_row.filter(
-            [
-                "mean_120",
-                "std_120",
-                "volume_120",
-                "RWoML_120",
-                "RWoMB_120",
-                "predicted_bsp",
-                "back",
-                "lay",
-            ]
+
+        # mean = self._get_timepoint_mean(runner.selection_id, market_id, timepoint)
+        # back_price_adjusted, _ = self._get_adjusted_prices(mean, "BACK")
+        # lay_price_adjusted, _ = self._get_adjusted_prices(mean, "LAY")
+
+        back_obs = self._get_flumine_observation_margin_matched(
+            "BACK", market_id, runner.selection_id, bsp
         )
-        predict_row["predicted_bsp"] = predicted_bsp
+        lay_obs = self._get_flumine_observation_margin_matched(
+            "LAY", market_id, runner.selection_id, bsp
+        )
+        observation_df = pd.concat(
+            [
+                observation_df,
+                pd.DataFrame(
+                    {
+                        "predicted_bsp": [predicted_bsp],
+                        "lay": [lay_obs],
+                        "back": [back_obs],
+                    },
+                    index=observation_df.index,
+                ),
+            ],
+            axis=1,
+        )
+        model = self.selection_id_models[market_id][runner.selection_id]
+        model_name = self.model_name.split("_")[0].lower()
+        if model_name == "ppo":
+            action, _ = model.predict(observation_df.to_numpy(), deterministic=True)
+            action = action[0] if isinstance(action, np.ndarray) else action
 
-        action, _ = self.model.predict(predict_row.to_numpy())
-        action = action[0] if isinstance(action, np.ndarray) else action
-        print("pred", predicted_bsp, "action", action)
+        if model_name == "rppo":
+            episode_start = np.array([timepoint == 14400])
+            try:
+                action, states = model.predict(
+                    observation=observation_df.to_numpy().reshape(1, -1),
+                    episode_start=episode_start,
+                    state=self.states[market_id][runner.selection_id],
+                    deterministic=True,
+                )
+                self.states[market_id][runner.selection_id] = states
+                action = action[0] if isinstance(action, np.ndarray) else action
+            except Exception as e:
+                print("Error during prediction:", str(e))
 
-        return action, mean_120, predicted_bsp
+        # print("pred", predicted_bsp, "action", action)
+
+        return action, predicted_bsp
+
+    def _get_flumine_observation_margin_matched(
+        self, side, market_id, selection_id: int, bsp
+    ):
+        tracker = self._get_tracker(side)
+        matched_tracker = self._get_matched_tracker(side)
+
+        if not matched_tracker[market_id].get(selection_id, False):
+            return 0
+
+        order = tracker[market_id][selection_id][0]
+        price = tracker[market_id][selection_id][-1]
+
+        margin = calculate_margin(side, order.size_matched, price, bsp)
+
+        return margin
+
+    def _get_flumine_observation_margin(
+        self, side, market_id, selection_id: int, bsp, price_adjusted
+    ):
+        tracker = self._get_tracker(side)
+
+        if not tracker[market_id].get(selection_id, False):
+            return 0
+
+        if not tracker[market_id][selection_id].get("order", False):
+            return 0
+
+        stake = calculate_stake(self.max_stake, price_adjusted, side)
+
+        margin = calculate_margin(side, stake, price_adjusted, bsp)
+
+        return margin

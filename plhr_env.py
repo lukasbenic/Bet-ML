@@ -37,6 +37,8 @@ import pandas as pd
 from utils.data_utils import get_train_data
 import matplotlib.pyplot as plt
 from utils.strategy_utils import calculate_margin, calculate_stake
+from sb3_contrib import RecurrentPPO
+from stable_baselines3.common.evaluation import evaluate_policy
 
 
 class Actions(Enum):
@@ -73,9 +75,8 @@ class PreLiveHorseRaceEnv(gym.Env):
 
     def step(self, action):
         # print(self.episode)
-        # print(self.current_step)
         observation = self._get_observation()
-        bsp = self.y.iloc[self.current_step].to_frame().T["bsps"].values[0]
+        bsp = self.y.iloc[self.episode - 1].to_frame().T["bsps"].values[0]
         predicted_bsp = self._predict(observation)
 
         side = (
@@ -104,6 +105,9 @@ class PreLiveHorseRaceEnv(gym.Env):
             "bsp": bsp,
             "side": side,
         }
+        # print(
+        #     self.X.iloc[1][["back", "lay", "predicted_bsp"]],
+        # )
 
         return next_observation, reward, done, info
 
@@ -125,7 +129,34 @@ class PreLiveHorseRaceEnv(gym.Env):
         predicted_bsp = regressor.predict(observation_scaled)[0]
 
         observation[-3] = predicted_bsp
+        self._set_predicted_bsp_observation(predicted_bsp)
         return predicted_bsp
+
+    def _set_margin_observation(self, margin: float, side: str) -> None:
+        """
+        Set the margin observation in the original dataframe.
+
+        Args:
+        margin (float): Margin value to set.
+        side (str): The side to set the margin value for.
+
+        Returns:
+        None
+        """
+        iloc = -1 if side == "back" else -2
+        self.X.iat[self.episode - 1, iloc] = margin
+
+    def _set_predicted_bsp_observation(self, predicted_bsp: float) -> None:
+        """
+        Set the predicted_bsp observation in the original dataframe.
+
+        Args:
+        predicted_bsp (float): Predicted BSP value to set.
+
+        Returns:
+        None
+        """
+        self.X.iat[self.episode - 1, -3] = predicted_bsp
 
     def _make_bet(self, side, bsp, predicted_bsp, observation):
         mean = observation[0]
@@ -147,12 +178,16 @@ class PreLiveHorseRaceEnv(gym.Env):
             ):
                 observation[-1] = margin
 
+                self._set_margin_observation(margin, side)
+
             if (
                 side == "lay"
                 and predicted_bsp > confidence_price
                 and observation[-2] == 0
             ):
                 observation[-2] = margin
+
+                self._set_margin_observation(margin, side)
 
     def reset(self):
         self.current_step = 0  # start at first row of observation space
@@ -177,12 +212,12 @@ class PreLiveHorseRaceEnv(gym.Env):
             # maybe see what happens when we don't set a final bet?
 
             # Back set to mean_120
-            if observation[-1] == 0:
-                observation[-1] = mean
+            # if observation[-1] == 0:
+            #     observation[-1] = mean
 
-            # Lay set to mean_120
-            if observation[-2] == 0:
-                observation[-2] = mean
+            # # Lay set to mean_120
+            # if observation[-2] == 0:
+            #     observation[-2] = mean
 
             reward = observation[-1] + observation[-2]
 
@@ -204,7 +239,7 @@ class PreLiveHorseRaceEnv(gym.Env):
     def _get_observation(self) -> np.ndarray:
         row = self.X.iloc[
             self.episode - 1
-        ]  # episode will start at 1 due to +=1 in reset
+        ].copy()  # episode will start at 1 due to +=1 in reset
         filtered_row = row.filter(
             regex=f"^(?!predicted_bsp|lay|back).*_{self.current_timepoint}$"
         ).values
@@ -229,9 +264,8 @@ class PreLiveHorseRaceEnv(gym.Env):
             "number"
         ]
         number_adjust = number
-        # 10 7 hex
-        # 8 4 here
-        confidence_number = number - 5 if side == "lay" else number + 1
+        # +7 -4 hex
+        confidence_number = number + 7 if side == "lay" else number - 4
         confidence_price = self.ticks_df.iloc[
             self.ticks_df["number"].sub(confidence_number).abs().idxmin()
         ]["tick"]
@@ -242,29 +276,28 @@ class PreLiveHorseRaceEnv(gym.Env):
         return price_adjusted, confidence_price
 
 
-def create_model(model_name: str, env, device, net_arch, learning_rate):
-    policy_kwargs = dict(
-        net_arch=net_arch,
-    )
-
+def create_model(model_name: str, env, device):
     model_class = {
         "ppo": PPO,
+        "rppo": RecurrentPPO,
     }.get(model_name.lower())
 
     if model_class is None:
         raise ValueError(f"Unsupported model: {model_name}")
 
-    model = model_class(
-        "MlpPolicy",
-        env,
-        verbose=1,
-        policy_kwargs=policy_kwargs,
-        learning_rate=learning_rate,
-        seed=42,
-        device=device,
-    )
+    if model_name.lower() == "ppo":
+        model = model_class(
+            "MlpPolicy",
+            env,
+            verbose=1,
+            seed=42,
+            device=device,
+        )
+        return model
 
-    return model
+    if model_name.lower() == "rppo":
+        model = model_class("MlpLstmPolicy", env, verbose=1, seed=42, device=device)
+        return model
 
 
 def train_model(
@@ -379,11 +412,10 @@ def train_model2(
     env: PreLiveHorseRaceEnv,
     eval_env: PreLiveHorseRaceEnv = None,
     save: bool = True,
+    saved_model_path="",
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model_class = {
-        "ppo": PPO,
-    }.get(rl_model_name.lower())
+    model_class = {"ppo": PPO, "rppo": RecurrentPPO}.get(rl_model_name.lower())
 
     if model_class is None:
         raise ValueError(f"Unsupported model: {rl_model_name}")
@@ -394,13 +426,6 @@ def train_model2(
 
     env = Monitor(env, f"{log_dir_train}/train_monitor.csv")
 
-    model = model_class(
-        "MlpPolicy",
-        env,
-        verbose=1,
-        seed=42,
-        device=device,
-    )
     callback_max_ep = StopTrainingOnMaxEpisodes(
         max_episodes=(len(env.X) - 1), verbose=1
     )
@@ -421,10 +446,19 @@ def train_model2(
     callback_list = (
         CallbackList([callback_max_ep, eval_callback]) if eval_env else callback_max_ep
     )
-    trained_model = model.learn(
-        total_timesteps=env.timesteps,
-        callback=callback_list,
+
+    model = (
+        PPO.load(
+            f"RL/{rl_model_name}/{rl_model_name}_{tpr_name}/{rl_model_name}_{tpr_name}_model_{saved_model_path}"
+        )
+        if saved_model_path
+        else create_model(rl_model_name, env, device)
     )
+    if saved_model_path:
+        model.set_env(env)
+
+    trained_model = model.learn(total_timesteps=env.timesteps, callback=callback_list)
+
     if save:
         trained_model.save(
             f"RL/{rl_model_name}/{rl_model_name}_{tpr_name}/{rl_model_name}_{tpr_name}_model"
@@ -488,7 +522,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--rl_model",
         type=str,
-        default="PPO",
+        default="RPPO",
         help="RL algorithm to use.",
     )
     parser.add_argument(
@@ -520,10 +554,12 @@ if __name__ == "__main__":
     tp_regressors = get_tp_regressors(X_regressors, y_regressors, args.tp_regressors)
     env = PreLiveHorseRaceEnv(X_rl, y_rl, tp_regressors, ticks_df)
     # eval_env = PreLiveHorseRaceEnv(X_rl, y_rl, tp_regressors, ticks_df)
-    model = train_model2(args.rl_model, args.tp_regressors, env)
+    model = train_model2(
+        args.rl_model, args.tp_regressors, env, saved_model_path="+7_-4"
+    )
 
     # train_optimize_model("PPO", X_rl, y_rl, args.tp_regressors, tp_regressors, ticks_df)
     # save_rolling_rewards(
-    #     file_path="RL/PPO/PPO_BayesianRidge/train_monitor_2_1.csv",
-    #     save_path="RL/PPO/PPO_BayesianRidge/train_monitor_rolling_2_1.csv",
+    #     file_path="RL/PPO/PPO_BayesianRidge/train_monitor_2_+4_-3.csv",
+    #     save_path="RL/PPO/PPO_BayesianRidge/train_monitor_rolling_2_+4_-3.csv",
     # )

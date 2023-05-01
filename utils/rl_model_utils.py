@@ -1,9 +1,12 @@
 import os
 from typing import Any, Dict, List, Tuple
 import joblib
+from sb3_contrib import RecurrentPPO
 from sklearn.preprocessing import StandardScaler
 import numpy as np
 import pandas as pd
+from stable_baselines3 import PPO
+import torch
 from onedrive import Onedrive
 from utils.data_utils import get_test_data
 
@@ -139,6 +142,19 @@ def get_sorted_columns(columns, current_timepoint):
     )
 
     return sorted_columns
+
+
+def load_model(model_name):
+    models = model_name.split("_")
+
+    if models[0].lower() == "ppo":
+        return PPO.load(f"RL/{models[0]}/{model_name}/{model_name}_model_2_-2_+2")
+
+    if models[0].lower() == "rppo":
+        return RecurrentPPO.load(
+            f"RL/{models[0]}/{model_name}/{model_name}_model_+2_-2",
+            # map_location=torch.device("cpu"),
+        )
 
 
 def train_tp_regressors(
@@ -292,6 +308,49 @@ def test_models(
         test_metrics_df.index = test_metrics_df.index.astype(int)
         test_metrics_df.sort_index(inplace=True)
         test_metrics_df.to_csv(f"{save_path}/test_metrics.csv", index_label="Regressor")
+
+
+def get_tp_regressor_on_timepoint(
+    timepoint: int,
+    tpr_dir: str = "RL/timepoint_regressors/models",
+    scaler_dir: str = "RL/timepoint_regressors/scalers",
+):
+    model_file = f"{tpr_dir}/BayesianRidge_{timepoint}.pkl"
+    scaler_file = f"{scaler_dir}/BayesianRidge_{timepoint}_scaler.pkl"
+
+    model = joblib.load(model_file)
+    scaler = joblib.load(scaler_file)
+
+    return model, scaler
+
+
+def save_timesteps(
+    file_path: str = "RL/PPO/PPO_BayesianRidge/monitor.csv",
+    min_periods=False,
+    save_path: str = "RL/PPO/PPO_BayesianRidge/rolling_timesteps.csv",
+):
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+
+    # Clean the data and create a dataframe
+    data = [line.strip().split(",") for line in lines if not line.startswith("#")]
+    df = pd.DataFrame(data, columns=["r", "l", "t"])
+    df.drop(0, inplace=True)
+
+    # Transpose the dataframe and reset the index
+    df_t = df.transpose().set_index(df.columns)
+    timesteps = pd.Series(
+        df_t.loc["l"].astype(int)
+    )  # 'l' stands for 'length' of the episode, which is equivalent to timesteps
+
+    if min_periods:
+        rolling_timesteps = timesteps.rolling(window=200, min_periods=1).mean()
+    else:
+        rolling_timesteps = timesteps.rolling(window=200).mean()
+
+    rolling_timesteps = rolling_timesteps.dropna()
+    # Optional: Save the rolling_timesteps to a new CSV file
+    rolling_timesteps.to_frame().T.to_csv(save_path, index=False)
 
 
 def save_rolling_rewards(

@@ -89,7 +89,7 @@ def piped_run(
         metrics = run(strategy, framework)
         update_tracker(tracker, metrics)
         # NOTE it shows balance from previous run???
-        tracker["balance"] = strategy.balance
+        tracker["balance"] = balance + tracker["actual_profit_plotter"][-1]
 
     # Call the function to calculate performance metrics
     performanc_metrics = calculate_performance_metrics(tracker)
