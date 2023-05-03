@@ -148,11 +148,11 @@ def load_model(model_name):
     models = model_name.split("_")
 
     if models[0].lower() == "ppo":
-        return PPO.load(f"RL/{models[0]}/{model_name}/{model_name}_model_128_-2_+2")
+        return PPO.load(f"RL/{models[0]}/{model_name}/{model_name}_model_new_-2_+2")
 
     if models[0].lower() == "rppo":
         return RecurrentPPO.load(
-            f"RL/{models[0]}/{model_name}/{model_name}_model_+7_-4",
+            f"RL/{models[0]}/{model_name}/{model_name}_model_new_+7_-4",
             # map_location=torch.device("cpu"),
         )
 
@@ -371,10 +371,31 @@ def save_rolling_rewards(
     rewards = pd.Series(df_t.loc["r"].astype(float))
 
     if min_periods:
-        rolling_rewards = rewards.rolling(window=200, min_periods=1).mean()
+        rolling_rewards = rewards.rolling(window=500, min_periods=1).mean()
     else:
-        rolling_rewards = rewards.rolling(window=200).mean()
+        rolling_rewards = rewards.rolling(window=500).mean()
 
     rolling_rewards = rolling_rewards.dropna()
     # Optional: Save the rolling_rewards to a new CSV file
     rolling_rewards.to_frame().T.to_csv(save_path, index=False)
+
+
+def save_means(save_path="RL/RPPO/RPPO_BayesianRidge"):
+    fs = os.listdir(save_path)
+    f_lst = [f for f in fs if "train" in f.split("_")]
+
+    means_df = pd.DataFrame()
+
+    for f in f_lst:
+        with open(os.path.join(save_path, f), "r") as metrics:
+            lines = metrics.readlines()
+
+        data = [line.strip().split(",") for line in lines if not line.startswith("#")]
+        df = pd.DataFrame(data, columns=["r", "l", "t"])
+        df.drop(index=0, inplace=True)
+        df = df.apply(lambda x: pd.to_numeric(x))
+        means = pd.DataFrame(df.mean()).T
+        means.index = [f]
+        means_df = pd.concat([means, means_df])
+
+    means_df.to_csv(f"{save_path}/monitor_means.csv")

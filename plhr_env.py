@@ -266,7 +266,7 @@ class PreLiveHorseRaceEnv(gym.Env):
         ]
         number_adjust = number
         # +7 -4 hex
-        confidence_number = number + 10 if side == "lay" else number - 3
+        confidence_number = number + 2 if side == "lay" else number - 2
         confidence_price = self.ticks_df.iloc[
             self.ticks_df["number"].sub(confidence_number).abs().idxmin()
         ]["tick"]
@@ -412,7 +412,7 @@ def train_model2(
     eval_env: PreLiveHorseRaceEnv = None,
     policy_kwargs=dict(
         activation_fn=torch.nn.ReLU,
-        net_arch=dict(pi=[128, 128, 128], vf=[128, 128, 128]),
+        net_arch=dict(pi=[64, 64, 64], vf=[64, 64, 64]),
     ),
     save: bool = True,
     saved_model_path="",
@@ -561,6 +561,6 @@ if __name__ == "__main__":
 
     # train_optimize_model("PPO", X_rl, y_rl, args.tp_regressors, tp_regressors, ticks_df)
     # save_rolling_rewards(
-    #     file_path="RL/PPO/PPO_BayesianRidge/train_monitor_128_-2_+2.csv",
-    #     save_path="RL/PPO/PPO_BayesianRidge/train_monitor_rolling_128_-2_+2.csv",
+    #     file_path="RL/PPO/PPO_BayesianRidge/train_monitor_128_+10_-3.csv",
+    #     save_path="RL/PPO/PPO_BayesianRidge/train_monitor_rolling_128_+10_-3.csv",
     # )
