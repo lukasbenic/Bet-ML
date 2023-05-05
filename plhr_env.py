@@ -265,8 +265,8 @@ class PreLiveHorseRaceEnv(gym.Env):
             "number"
         ]
         number_adjust = number
-        # +7 -4 hex
-        confidence_number = number + 2 if side == "lay" else number - 2
+        # -2 +2 hex
+        confidence_number = number - 2 if side == "lay" else number + 2
         confidence_price = self.ticks_df.iloc[
             self.ticks_df["number"].sub(confidence_number).abs().idxmin()
         ]["tick"]
@@ -412,7 +412,7 @@ def train_model2(
     eval_env: PreLiveHorseRaceEnv = None,
     policy_kwargs=dict(
         activation_fn=torch.nn.ReLU,
-        net_arch=dict(pi=[64, 64, 64], vf=[64, 64, 64]),
+        net_arch=dict(pi=[64, 64], vf=[64, 64]),
     ),
     save: bool = True,
     saved_model_path="",
@@ -557,7 +557,9 @@ if __name__ == "__main__":
     tp_regressors = get_tp_regressors(X_regressors, y_regressors, args.tp_regressors)
     env = PreLiveHorseRaceEnv(X_rl, y_rl, tp_regressors, ticks_df)
     # eval_env = PreLiveHorseRaceEnv(X_rl, y_rl, tp_regressors, ticks_df)
-    model = train_model2(args.rl_model, args.tp_regressors, env)
+    model = train_model2(
+        args.rl_model, args.tp_regressors, env, saved_model_path="2_-2_+2"
+    )
 
     # train_optimize_model("PPO", X_rl, y_rl, args.tp_regressors, tp_regressors, ticks_df)
     # save_rolling_rewards(

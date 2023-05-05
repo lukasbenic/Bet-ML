@@ -614,7 +614,7 @@ class RLStrategy(BaseStrategy):
             "number"
         ]
         number_adjust = number
-        confidence_number = number + 7 if side == "LAY" else number - 4
+        confidence_number = number - 2 if side == "LAY" else number + 2
         confidence_price = self.ticks_df.iloc[
             self.ticks_df["number"].sub(confidence_number).abs().idxmin()
         ]["tick"]

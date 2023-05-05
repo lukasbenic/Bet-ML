@@ -148,7 +148,7 @@ def load_model(model_name):
     models = model_name.split("_")
 
     if models[0].lower() == "ppo":
-        return PPO.load(f"RL/{models[0]}/{model_name}/{model_name}_model_new_-2_+2")
+        return PPO.load(f"RL/{models[0]}/{model_name}/{model_name}_model_-2_+2")
 
     if models[0].lower() == "rppo":
         return RecurrentPPO.load(
