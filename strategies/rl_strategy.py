@@ -1,39 +1,56 @@
-from typing import Tuple, Union
-import gymnasium
+from copy import deepcopy
+from typing import Dict, Tuple
+import joblib
 import numpy as np
 import pandas as pd
 
 from flumine import BaseStrategy
 from flumine.order.trade import Trade
-from flumine.order.order import LimitOrder, MarketOnCloseOrder, OrderStatus
+from flumine.order.order import (
+    LimitOrder,
+    MarketOnCloseOrder,
+    OrderStatus,
+    BaseOrder,
+)
 from flumine.markets.market import Market
 from betfairlightweight.resources import MarketBook, RunnerBook
-from sklearn.preprocessing import StandardScaler
 from stable_baselines3 import PPO
-
-from utils.constants import TIME_BEFORE_START
-
-from toms_utils import normalized_transform
+from plhr_env import Actions
+from utils.constants import TIME_BEFORE_START, TIMEPOINTS
+from utils.rl_model_utils import (
+    get_sorted_columns,
+    get_tp_regressor_on_timepoint,
+    load_model,
+)
+from utils.strategy_utils import (
+    calculate_gambled,
+    calculate_margin,
+    calculate_stake,
+)
+from utils.data_utils import preprocess_test_analysis, normalized_transform
+from sklearn.preprocessing import StandardScaler
 
 
 class RLStrategy(BaseStrategy):
     def __init__(
         self,
-        scaler: StandardScaler,
         ticks_df: pd.DataFrame,
         test_analysis_df: pd.DataFrame,
-        model,
-        env,
-        clm,
+        balance,
+        model_name,
+        # tp_regressor,
+        green_enabled=False,
         *args,
         **kwargs,
     ):
-        self.scaler = scaler
+        self.states = {}
         self.ticks_df = ticks_df
-        self.model = model
-        self.env = env = gymnasium.make("HorseRace")  # env
-        self.clm = clm
-        self.test_analysis_df = test_analysis_df
+        self.model_name = model_name
+        # self.tp_regressor = tp_regressor
+        # self.scaler = joblib.load(
+        #     f"RL/timepoint_regressors/scalers/BayesianRidge_120_scaler.pkl"
+        # )
+        self._set_and_preprocess_test_analysis(test_analysis_df)
         self.metrics = {
             "profit": 0,
             "q_correct": 0,
@@ -50,51 +67,98 @@ class RLStrategy(BaseStrategy):
             "back_matched_incorrect": 0,
             "q_margin": 0,
         }
-        super_kwargs = kwargs.copy()
-        super_kwargs.pop("scaler", None)
-        super_kwargs.pop("ticks_df", None)
-        super_kwargs.pop("test_analysis_df", None)
-        super_kwargs.pop("model", None)
-        super_kwargs.pop("env", None)
-        super_kwargs.pop("clm", None)
-        super().__init__(*args, **super_kwargs)
-
-    # back and lay in here
-
-    def start(self) -> None:
+        self.green_enabled = green_enabled
+        self.balance = balance
         self.back_bet_tracker = {}
         self.matched_back_bet_tracker = {}
         self.lay_bet_tracker = {}
         self.matched_lay_bet_tracker = {}
-        self.order_dict_back = {}
-        self.order_dict_lay = {}
-        self.LP_traded = {}
         self.seconds_to_start = None
         self.market_open = True
-        self.stake = 50  # @WHAT IS THIS
+        self.max_stake = self.balance * 0.08
         self.first_nonrunners = True
         self.runner_number = None
+        self.selection_id_models = {}
+        self.timepoint_preds = {}
+        super_kwargs = kwargs.copy()
+        super_kwargs.pop("ticks_df", None)
+        super_kwargs.pop("test_analysis_df", None)
+        super_kwargs.pop("model_name", None)
+        # super_kwargs.pop("tp_regressor", None)
+        super_kwargs.pop("balance", None)
+        super_kwargs.pop("green_enabled", None)
+        super().__init__(*args, **super_kwargs)
 
-    def check_market_book(self, market: Market, market_book: MarketBook) -> bool:
-        # process_market_book only executed if this returns True
-        _ = self.process_fundamentals(market_book)
-        if self.first_nonrunners:
-            self.runner_number = market_book.number_of_active_runners
-            self.first_nonrunners = False
-        else:
-            if market_book.number_of_active_runners != self.runner_number:
-                return False  # this will stop any more action happening in this market.
+    def start(self) -> None:
+        pass
 
-        if (market_book.status == "CLOSED") or (
-            self.seconds_to_start < TIME_BEFORE_START
+    def _set_and_preprocess_test_analysis(self, test_analysis_df):
+        test_analysis_df, test_analysis_df_y = preprocess_test_analysis(
+            test_analysis_df
+        )
+        # test_analysis_df[
+        #     ["predicted_bsp", "lay", "back"]
+        # ] = 0  # to match correct observations from env
+        self.test_analysis_df = test_analysis_df
+        self.test_analysis_df_y = test_analysis_df_y
+
+    def _set_market_id(self, market_id: float):
+        if market_id not in self.back_bet_tracker.keys():
+            self.back_bet_tracker[market_id] = {}
+            self.matched_back_bet_tracker[market_id] = {}
+
+        if market_id not in self.lay_bet_tracker.keys():
+            self.lay_bet_tracker[market_id] = {}
+            self.matched_lay_bet_tracker[market_id] = {}
+
+        if market_id not in self.states.keys():
+            self.states[market_id] = {}
+
+        if market_id not in self.timepoint_preds.keys():
+            self.timepoint_preds[market_id] = {}
+
+        if market_id not in self.selection_id_models.keys():
+            self.selection_id_models[market_id] = {}
+
+    def _should_skip_runner(self, market_id: float, runner: RunnerBook):
+        """Determines whether or not to skip processing a runner based on various conditions.
+
+        Args:
+            market_id (float): The ID of the market.
+            runner (RunnerBook): The runner to process.
+
+        Returns:
+            bool: True if the runner should be skipped, False otherwise.
+        """
+        if (
+            not runner.status == "ACTIVE"
+            or not self.test_analysis_df["selection_ids"]
+            .isin([runner.selection_id])
+            .any()
+            or not self.test_analysis_df["market_id"].isin([market_id]).any()
+            or (
+                self.matched_back_bet_tracker[market_id].get(runner.selection_id, False)
+                and self.matched_lay_bet_tracker[market_id].get(
+                    runner.selection_id, False
+                )
+            )
         ):
-            return False
-        else:
             return True
+        return False
 
     def process_fundamentals(self, market_book: MarketBook):
-        # We already have everything we need in an excel file.
-        # runner_count = 0
+        """
+        Extracts the necessary information from the market book to be used by the strategy.
+
+        Args:
+            market_book (MarketBook): The current market book for the market being monitored.
+
+        Returns:
+            bool: Always returns True.
+
+        Sets:
+            self.seconds_to_start (float): The number of seconds until the market start time.
+        """
         seconds_to_start = (
             market_book.market_definition.market_time - market_book.publish_time
         ).total_seconds()
@@ -102,19 +166,399 @@ class RLStrategy(BaseStrategy):
 
         return True
 
-    def process_runners(self):
-        # This doesn't need to do anything.
-        pass
+    def check_market_book(self, market: Market, market_book: MarketBook) -> bool:
+        """
+        Checks whether the market book should be processed based on certain conditions
+        (process_market_book only runs if this returns True).
 
-    def __send_order(
+
+        Args:
+            market (Market): The market object.
+            market_book (MarketBook): The market book object.
+
+        Returns:
+            bool: True if the market book should be processed, False otherwise.
+        """
+        _ = self.process_fundamentals(market_book)
+
+        if self.first_nonrunners:
+            self.runner_number = market_book.number_of_active_runners
+            self.first_nonrunners = False
+        else:
+            if market_book.number_of_active_runners != self.runner_number:
+                return False  # this will stop any more action happening in this market.
+
+        if market_book.status == "CLOSED" or self.seconds_to_start < TIME_BEFORE_START:
+            return False
+        else:
+            return True
+
+    def process_market_book(self, market: Market, market_book: MarketBook) -> None:
+        """
+        Processes the market book and sends bets based on the current state of the market.
+
+        Args:
+            market (Market): The current market.
+            market_book (MarketBook): The current market book.
+        Returns:
+            None
+        """
+        market_id = float(market_book.market_id)
+        self._set_market_id(market_id)
+
+        timepoints = TIMEPOINTS
+        timepoint = min(
+            (tp for tp in timepoints if tp >= self.seconds_to_start), default=None
+        )
+
+        trade_window = timepoint - self.seconds_to_start
+        if (
+            self.seconds_to_start < timepoints[0] - 10
+            or self.seconds_to_start > timepoints[-1]
+        ) or not (0.00 < trade_window < 10.00):
+            return
+
+        for runner in market_book.runners:
+            if self._should_skip_runner(market_id=market_id, runner=runner):
+                continue
+
+            if runner.selection_id not in self.selection_id_models[market_id].keys():
+                self.selection_id_models[market_id][runner.selection_id] = load_model(
+                    self.model_name
+                )
+
+            if runner.selection_id not in self.states[market_id].keys():
+                self.states[market_id][runner.selection_id] = None
+
+            mean = self._get_timepoint_mean(runner.selection_id, market_id, timepoint)
+            bsp = self._get_bsp(runner.selection_id, market_id)
+
+            if runner.selection_id not in self.timepoint_preds[market_id].keys():
+                self.timepoint_preds[market_id][runner.selection_id] = {}
+            if (
+                timepoint
+                not in self.timepoint_preds[market_id][runner.selection_id].keys()
+            ):
+                (action, predicted_bsp) = self._get_action_and_features(
+                    runner, market_id, timepoint, bsp
+                )
+                self.timepoint_preds[market_id][runner.selection_id][timepoint] = action
+
+            action = self.timepoint_preds[market_id][runner.selection_id][timepoint]
+            if action == Actions.NOTHING.value:
+                continue
+
+            side = "BACK" if action == Actions.BACK.value else "LAY"
+
+            (
+                price_adjusted,
+                confidence_price,
+            ) = self._get_adjusted_prices(mean=mean, side=side)
+
+            if (
+                action == Actions.LAY.value
+                # and predicted_bsp > confidence_price
+                and price_adjusted <= self.max_stake
+                and not self.matched_lay_bet_tracker[market_id].get(
+                    runner.selection_id, False
+                )
+                and runner.selection_id not in self.lay_bet_tracker[market_id]
+            ):
+                self._create_order(
+                    market_id,
+                    runner,
+                    price_adjusted,
+                    bsp,
+                    market,
+                    side="LAY",
+                )
+
+            if (
+                action == Actions.BACK.value
+                # and predicted_bsp < confidence_price
+                and not self.matched_back_bet_tracker[market_id].get(
+                    runner.selection_id, False
+                )
+                and runner.selection_id not in self.back_bet_tracker[market_id]
+            ):
+                self._create_order(
+                    market_id,
+                    runner,
+                    price_adjusted,
+                    bsp,
+                    market,
+                    side="BACK",
+                )
+
+    def process_orders(self, market: Market, orders: list) -> None:
+        """Processes orders that have been placed in the market.
+
+        Args:
+            market (Market): The market object associated with the orders.
+            orders (list): A list of Order objects that have been placed in the market.
+
+        Returns:
+            None
+        """
+        sides = ["BACK", "LAY"]
+
+        for side in sides:
+            tracker = self._get_tracker(side)
+            matched_tracker = self._get_matched_tracker(side)
+
+            if not len(tracker.keys()) > 0:
+                print(f"No bets have been made for side {side} and market {market}")
+                continue
+
+            for market_id in tracker.keys():
+                for selection_id in tracker[market_id].keys():
+                    if len(tracker[market_id][selection_id]) == 0:
+                        print(
+                            f"No bets have been made for side {side} and runner id {selection_id} in market id {market_id}"
+                        )
+                        continue
+
+                    # Now we process orders we have made
+                    self._process_order_for_selection(
+                        market,
+                        side,
+                        tracker,
+                        matched_tracker,
+                        market_id,
+                        selection_id,
+                    )
+
+    def _process_order_for_selection(
+        self,
+        market: Market,
+        side: str,
+        tracker: dict,
+        matched_tracker: dict,
+        market_id: str,
+        selection_id: str,
+    ) -> None:
+        side_mc_key = f"{side.lower()}_matched_correct"
+        side_mi_key = f"{side.lower()}_matched_incorrect"
+
+        order = tracker[market_id][selection_id][0]
+        price = tracker[market_id][selection_id][-1]
+        bsp_value = tracker[market_id][selection_id][1]
+
+        margin = calculate_margin(side, order.size_matched, price, bsp_value)
+        gambled = calculate_gambled(side, order.size_matched, price)
+        # print("order", order.size_matched, "margin", margin, "gambled", gambled)
+        # here [0:8] -- hex all
+        timepoint = min(
+            (tp for tp in TIMEPOINTS if tp >= self.seconds_to_start),
+            default=None,
+        )
+
+        # Order has been fully matched
+        if order.status == OrderStatus.EXECUTION_COMPLETE:
+            if matched_tracker[market_id][selection_id]:
+                return
+            matched_tracker[market_id][selection_id] = True
+            self._process_matched_order(
+                market,
+                side,
+                tracker,
+                market_id,
+                selection_id,
+                order,
+                side_mc_key,
+                side_mi_key,
+                price,
+                bsp_value,
+                margin,
+                gambled,
+            )
+
+        # Order that has a remaining unmatched portion
+        elif (
+            order.status == OrderStatus.EXECUTABLE
+            and order.size_matched > 0
+            and self.seconds_to_start <= timepoint - 10
+            and not matched_tracker[market_id].get(selection_id, False)
+        ):
+            self.metrics["amount_gambled"] += gambled
+            self._update_metrics(
+                side, price, bsp_value, margin, side_mc_key, side_mi_key
+            )
+            market.cancel_order(order)
+            matched_tracker[market_id][selection_id] = True
+            print(
+                f"Partially Matched Order Cancelled: {order} at {self.seconds_to_start} seconds_to_start and tp {timepoint}"
+            )
+
+        elif order.size_matched == 0 and self.seconds_to_start <= timepoint - 10:
+            market.cancel_order(order)
+            print(
+                f"Order Cancelled: {order} at {self.seconds_to_start} seconds_to_start and tp {timepoint}"
+            )
+            del tracker[market_id][selection_id]
+            matched_tracker[market_id][selection_id] = False
+
+    def _process_matched_order(
+        self,
+        market: Market,
+        side: str,
+        tracker: dict,
+        market_id: str,
+        selection_id: str,
+        order: BaseOrder,
+        side_mc_key: str,
+        side_mi_key: str,
+        price: float,
+        bsp_value: float,
+        margin: float,
+        gambled: float,
+    ) -> None:
+        """
+        Process a matched order, updating relevant trackers and metrics.
+
+        Args:
+            market (Market): The market the order was placed on.
+            side (str): The side of the bet, either 'BACK' or 'LAY'.
+            tracker (dict): The tracker containing the orders for the side and market.
+            market_id (str): The ID of the market.
+            selection_id (str): The ID of the selection.
+            order (BaseOrder): The order that was matched.
+            side_mc_key (str): The key to the matched correct side metric.
+            side_mi_key (str): The key to the matched incorrect side metric.
+            price (float): The price of the bet.
+            bsp_value (float): The Betfair Starting Price value.
+            margin (float): The calculated margin.
+            gambled (float): The amount gambled.
+
+        Returns:
+            None
+        """
+        if side == "BACK":
+            print("back_size_matched", order.size_matched)
+        if (order.size_matched > 10.00 and side == "BACK") or (
+            order.size_matched > 1 and side == "LAY"
+        ):
+            print(
+                f"Order matched for side: {side}, market_id: {market_id}, selection_id: {selection_id}, order: {order}, price: {price}, margin: {margin}, bsp_value: {bsp_value}, gambled: {gambled}"
+            )
+
+            # TODO ensure this is correct
+            if self.green_enabled:
+                self._green_up(market, side, order, tracker, market_id, selection_id)
+                self.metrics["green_margin"] += margin
+
+            self._update_metrics(
+                side, price, bsp_value, margin, side_mc_key, side_mi_key
+            )
+            self.metrics["amount_gambled"] += gambled
+
+    def _green_up(
+        self,
+        market: Market,
+        side: str,
+        order: BaseOrder,
+        tracker: dict,
+        market_id: str,
+        selection_id: str,
+    ) -> None:
+        """
+        Greens up a matched bet by placing an opposing bet.
+
+        Args:
+            market (Market): The market object.
+            side (str): The side of the bet ("BACK" or "LAY").
+            order (BaseOrder): The matched order.
+            tracker (dict): The tracker containing the orders for the side and market.
+            market_id (str): The ID of the market.
+            selection_id (str): The ID of the selection.
+
+        Returns:
+            None
+        """
+        selection_id_ = tracker[market_id][selection_id][3]
+        handicap_ = tracker[market_id][selection_id][4]
+        market_id_ = tracker[market_id][selection_id][2]
+        trade = Trade(
+            market_id=market_id_,
+            selection_id=selection_id_,
+            handicap=handicap_,
+            strategy=self,
+        )
+        opposite_side = "LAY" if side == "BACK" else "BACK"
+        order = trade.create_order(
+            side=opposite_side,
+            order_type=MarketOnCloseOrder(liability=order.size_matched),
+        )
+        market.place_order(order)
+        print("Greened", order)
+
+    def _update_metrics(
+        self,
+        side: str,
+        price: float,
+        bsp_value: float,
+        margin: float,
+        matched_correct_key: str,
+        matched_incorrect_key: str,
+    ) -> None:
+        """
+        Updates the metrics based on the side, price, BSP value and margin.
+
+        Args:
+            side (str): The side of the bet ("BACK" or "LAY").
+            price (float): The price of the bet.
+            bsp_value (float): The BSP value.
+            margin (float): The margin of the bet.
+            matched_correct_key (str): The key for the matched correct metric.
+            matched_incorrect_key (str): The key for the matched incorrect metric.
+
+        Returns:
+            None
+        """
+        if (price > bsp_value and side == "BACK") or (
+            price < bsp_value and side == "LAY"
+        ):
+            print("matched_correct", margin)
+            self.metrics["matched_correct"] += 1
+            self.metrics[matched_correct_key] += 1
+            self.metrics["m_c_margin"] += margin
+        else:
+            print("incorrect", margin)
+            self.metrics["matched_incorrect"] += 1
+            self.metrics[matched_incorrect_key] += 1
+            self.metrics["m_i_margin"] += margin
+
+        self.balance = self.balance + margin
+        print("Balance is now", self.balance)
+
+    def _create_order(
         self,
         market_id: float,
         runner: RunnerBook,
         price_adjusted: np.float64,
-        bsp_value: np.float64,
+        bsp_value: float,
         market: Market,
         side: str,
     ):
+        """Creates and places an order on the specified market with the specified parameters.
+
+        Args:
+            market_id (float): The ID of the market to place the order on.
+            runner (RunnerBook): The runner on which to place the order.
+            price_adjusted (numpy.float64): The adjusted price for the order.
+            bsp_value (numpy.float64): The Betfair Starting Price value for the runner.
+            market (Market): The Betfair market on which to place the order.
+            side (str): The side of the market to place the order on, either 'BACK' or 'LAY'.
+
+        Returns:
+            None.
+
+        """
+        tracker = self._get_tracker(side)
+        matched_tracker = self._get_matched_tracker(side)
+        print("made")
+        tracker[market_id].setdefault(runner.selection_id, {})
+        matched_tracker[market_id].setdefault(runner.selection_id, {})
         trade = Trade(
             market_id=str(market_id),
             selection_id=runner.selection_id,
@@ -122,29 +566,22 @@ class RLStrategy(BaseStrategy):
             strategy=self,
         )
 
-        if price_adjusted > bsp_value:
-            self.metrics["q_correct"] += 1
-        else:
-            self.metrics["q_incorrect"] += 1
-
-        size = (
-            self.stake
-            if side == "BACK"
-            else round(self.stake / (price_adjusted - 1), 2)
-        )
+        is_price_above_bsp = price_adjusted > bsp_value
+        self.metrics["q_correct" if is_price_above_bsp else "q_incorrect"] += 1
+        stake = calculate_stake(self.max_stake, price_adjusted, side)
         order = trade.create_order(
             side=side,
             order_type=LimitOrder(
                 price=price_adjusted,
-                size=size,
+                size=stake,
                 persistence_type="LAPSE",
             ),
         )
 
         print(
-            f"{side} bet order created at {self.seconds_to_start} seconds to start: \n\t{side} price adjusted: {price_adjusted}\n\tOrder size: {size}"
+            f"{side} order created at {self.seconds_to_start}: \n\tmarket id {market_id} \n\tmarket {market} \n\trunner {runner} \n\tprice adjusted {price_adjusted} \n\tbsp_value {bsp_value} \n\tOrder size: {stake}"
         )
-        tracker = self.back_bet_tracker if side == "BACK" else self.lay_bet_tracker
+
         tracker[market_id][runner.selection_id] = [
             order,
             bsp_value,
@@ -154,208 +591,187 @@ class RLStrategy(BaseStrategy):
             runner.sp.actual_sp,
             price_adjusted,
         ]
+        matched_tracker[market_id][runner.selection_id] = False
+        market.place_order(order)
+        margin = calculate_margin(side, stake, price_adjusted, bsp_value)
+        self.metrics["q_margin"] += margin
 
-        matched_tracker = (
+    def _get_adjusted_prices(
+        self,
+        mean: np.float64,
+        side: str,
+    ) -> Tuple[np.float64, np.float64]:
+        """
+        Calculate adjusted prices for back and lay bets along with the BSP value.
+
+        :param test_analysis_df_y: A DataFrame containing the test analysis data
+        :param mean: The mean value for the current runner at the current timepoint
+        :param runner: The current RunnerBook object
+        :param market_id: The market ID for the current market
+        :return: A tuple containing the adjusted price, confidence price, and BSP value
+        """
+        number = self.ticks_df.iloc[self.ticks_df["tick"].sub(mean).abs().idxmin()][
+            "number"
+        ]
+        number_adjust = number
+        confidence_number = number - 2 if side == "LAY" else number + 2
+        confidence_price = self.ticks_df.iloc[
+            self.ticks_df["number"].sub(confidence_number).abs().idxmin()
+        ]["tick"]
+        price_adjusted = self.ticks_df.iloc[
+            self.ticks_df["number"].sub(number_adjust).abs().idxmin()
+        ]["tick"]
+
+        return price_adjusted, confidence_price
+
+    def _get_tracker(self, side: str) -> Dict[str, Dict[str, list]]:
+        """
+        Get the back or lay bet tracker based on the side.
+
+        Args:
+            side (str): The side to retrieve the tracker for.
+
+        Returns:
+            dict: The corresponding back or lay bet tracker.
+        """
+        return self.back_bet_tracker if side == "BACK" else self.lay_bet_tracker
+
+    def _get_matched_tracker(self, side: str) -> Dict[str, Dict[str, bool]]:
+        """
+        Get the matched back or lay bet tracker based on the side.
+
+        Args:
+            side (str): The side to retrieve the matched tracker for.
+
+        Returns:
+            dict: The corresponding matched back or lay bet tracker.
+        """
+        return (
             self.matched_back_bet_tracker
             if side == "BACK"
             else self.matched_lay_bet_tracker
         )
 
-        matched_tracker[market_id][runner.selection_id] = False
-
-        market.place_order(order)
-
-        self.metrics["q_margin"] += size * (price_adjusted - bsp_value) / price_adjusted
-
-    def __preprocess_test_analysis(self):
-        test_analysis_df = self.test_analysis_df.dropna()
-        test_analysis_df = test_analysis_df[
-            (test_analysis_df["mean_120"] <= 50) & (test_analysis_df["mean_120"] > 1.1)
+    def _get_timepoint_mean(self, selection_id, market_id, timepoint):
+        row = self.test_analysis_df.loc[
+            (self.test_analysis_df["selection_ids"] == selection_id)
+            & (self.test_analysis_df["market_id"] == market_id)
         ]
-        test_analysis_df = test_analysis_df[test_analysis_df["mean_14400"] > 0]
-        test_analysis_df = test_analysis_df.drop(
-            test_analysis_df[test_analysis_df["std_2700"] > 1].index
+
+        mean = row[f"mean_{timepoint}"].values[0]
+        return mean
+
+    def _get_bsp(self, selection_id, market_id):
+        row = self.test_analysis_df.loc[
+            (self.test_analysis_df["selection_ids"] == selection_id)
+            & (self.test_analysis_df["market_id"] == market_id)
+        ]
+
+        bsp = row["bsps"].values[0]
+        return bsp
+
+    def _get_action_and_features(
+        self, runner: RunnerBook, market_id: float, timepoint: int, bsp
+    ) -> Tuple[np.float64, np.float64]:
+        regressor, scaler = get_tp_regressor_on_timepoint(timepoint)
+
+        predict_row = self.test_analysis_df.loc[
+            (self.test_analysis_df["selection_ids"] == runner.selection_id)
+            & (self.test_analysis_df["market_id"] == market_id)
+        ].copy()
+        predict_row = predict_row.drop(
+            ["Unnamed: 0", "market_id", "bsps", "selection_ids"], axis=1
+        )
+        relevant_cols = get_sorted_columns(predict_row.columns, str(timepoint))
+        predict_row = predict_row[relevant_cols]
+        observation_df = predict_row.iloc[:, :5].copy()
+
+        predict_row = pd.DataFrame(
+            scaler.transform(predict_row),
+            columns=relevant_cols,
+        )
+        predicted_bsp = regressor.predict(predict_row)
+        predicted_bsp = (
+            predicted_bsp[0] if isinstance(predicted_bsp, np.ndarray) else predicted_bsp
         )
 
-        test_analysis_df_y = pd.DataFrame().assign(
-            market_id=test_analysis_df["market_id"],
-            selection_ids=test_analysis_df["selection_ids"],
-            bsps=test_analysis_df["bsps"],
+        # mean = self._get_timepoint_mean(runner.selection_id, market_id, timepoint)
+        # back_price_adjusted, _ = self._get_adjusted_prices(mean, "BACK")
+        # lay_price_adjusted, _ = self._get_adjusted_prices(mean, "LAY")
+
+        back_obs = self._get_flumine_observation_margin_matched(
+            "BACK", market_id, runner.selection_id, bsp
         )
+        lay_obs = self._get_flumine_observation_margin_matched(
+            "LAY", market_id, runner.selection_id, bsp
+        )
+        observation_df = pd.concat(
+            [
+                observation_df,
+                pd.DataFrame(
+                    {
+                        "predicted_bsp": [predicted_bsp],
+                        "lay": [lay_obs],
+                        "back": [back_obs],
+                    },
+                    index=observation_df.index,
+                ),
+            ],
+            axis=1,
+        )
+        model = self.selection_id_models[market_id][runner.selection_id]
+        model_name = self.model_name.split("_")[0].lower()
+        if model_name == "ppo":
+            action, _ = model.predict(observation_df.to_numpy(), deterministic=True)
+            action = action[0] if isinstance(action, np.ndarray) else action
 
-        return test_analysis_df, test_analysis_df_y
-
-    def process_market_book(self, market: Market, market_book: MarketBook, action) -> None:
-        # process marketBook object
-        # Take each incoming message and combine to a df
-        cont = self.process_fundamentals(market_book)
-        self.market_open = market_book.status
-
-        model = PPO("MlpPolicy", self.env, verbose=1)
-        model.learn(total_timesteps=10_000)
-
-        vec_env = model.get_env()
-        obs = vec_env.reset()
-
-
-        action, _states = model.predict(obs, deterministic=True)
-
-        # Done should should be check_market_book from strategy
-        
-        obs, reward, done, info = vec_env.step(action) # this should send an order BUT WE CANNNOT GET THE REWARD UNTIL ORDER IS MATCHED
-        vec_env.render()
-        # VecEnv resets automatically
-        # if done:
-        #   obs = env.reset()
-
-        self.env.close()
-        # We want to limit our betting to before the start of the race.
-
-        market_id = float(market_book.market_id)
-
-    def process_orders(self, market: Market, orders: list) -> None:
-        sides = ["BACK", "LAY"]
-        try:
-            for side in sides:
-                tracker = (
-                    self.back_bet_tracker if side == "BACK" else self.lay_bet_tracker
+        if model_name == "rppo":
+            episode_start = np.array([timepoint == 14400])
+            try:
+                action, states = model.predict(
+                    observation=observation_df.to_numpy().reshape(1, -1),
+                    episode_start=episode_start,
+                    state=self.states[market_id][runner.selection_id],
+                    deterministic=True,
                 )
-                matched_tracker = (
-                    self.matched_back_bet_tracker
-                    if side == "BACK"
-                    else self.matched_lay_bet_tracker
-                )
-                if len(tracker.keys()) == 0:
-                    return
+                self.states[market_id][runner.selection_id] = states
+                action = action[0] if isinstance(action, np.ndarray) else action
+            except Exception as e:
+                print("Error during prediction:", str(e))
 
-                for market_id in tracker.keys():
-                    for selection_id in tracker[market_id].keys():
-                        if len(tracker[market_id][selection_id]) == 0:
-                            continue
+        # print("pred", predicted_bsp, "action", action)
 
-                        order = tracker[market_id][selection_id][0]
+        return action, predicted_bsp
 
-                        if not order.status == OrderStatus.EXECUTION_COMPLETE:
-                            continue
+    def _get_flumine_observation_margin_matched(
+        self, side, market_id, selection_id: int, bsp
+    ):
+        tracker = self._get_tracker(side)
+        matched_tracker = self._get_matched_tracker(side)
 
-                        if not matched_tracker[market_id][selection_id]:
-                            matched_tracker[market_id][selection_id] = True
+        if not matched_tracker[market_id].get(selection_id, False):
+            return 0
 
-                            # lay price adjusted or back price
-                            price = tracker[market_id][selection_id][-1]
+        order = tracker[market_id][selection_id][0]
+        price = tracker[market_id][selection_id][-1]
 
-                            # NOTE an order got matched at   -seconds_to_start - FIX?
-                            print(
-                                f"{side} matched at {self.seconds_to_start} seconds to start: \n\tOrder size: {order.size_matched}"
-                            )
-                            if side == "LAY":
-                                print(
-                                    f"\tSupposed layed size: {round(self.stake / (price - 1), 2)}"
-                                )
+        margin = calculate_margin(side, order.size_matched, price, bsp)
 
-                            if (
-                                (order.size_matched >= 10.00 and side == "BACK")
-                                or order.size_matched > 1
-                                and side == "LAY"
-                            ):  # because lowest amount
-                                bsp_value = tracker[market_id][selection_id][1]
-                                margin = (
-                                    (order.size_matched * (price - bsp_value) / price)
-                                    if side == "BACK"
-                                    else (
-                                        order.size_matched * (bsp_value - price) / price
-                                    )
-                                )
-                                if (price > bsp_value and side == "BACK") or (
-                                    price < bsp_value and side == "LAY"
-                                ):
-                                    side_matched_correct = (
-                                        self.metrics["back_matched_correct"]
-                                        if side == "BACK"
-                                        else self.metrics["lay_matched_correct"]
-                                    )
-                                    self.metrics["matched_correct"] += 1
-                                    side_matched_correct += 1
-                                    self.metrics["m_c_margin"] += margin
+        return margin
 
-                                else:
-                                    side_matched_incorrect = (
-                                        self.metrics["back_matched_incorrect"]
-                                        if side == "BACK"
-                                        else self.metrics["lay_matched_incorrect"]
-                                    )
-                                    self.metrics["matched_incorrect"] += 1
-                                    side_matched_incorrect += 1
-                                    self.metrics["m_i_margin"] += margin
+    def _get_flumine_observation_margin(
+        self, side, market_id, selection_id: int, bsp, price_adjusted
+    ):
+        tracker = self._get_tracker(side)
 
-                                self.metrics["green_margin"] += margin
+        if not tracker[market_id].get(selection_id, False):
+            return 0
 
-                                market_id_ = tracker[market_id][selection_id][2]
-                                selection_id_ = tracker[market_id][selection_id][3]
-                                handicap_ = tracker[market_id][selection_id][4]
+        if not tracker[market_id][selection_id].get("order", False):
+            return 0
 
-                                trade = Trade(
-                                    market_id=market_id_,
-                                    selection_id=selection_id_,
-                                    handicap=handicap_,
-                                    strategy=self,
-                                )
-                                order = trade.create_order(
-                                    side=side,
-                                    order_type=MarketOnCloseOrder(
-                                        liability=order.size_matched
-                                    ),
-                                )
-                                market.place_order(order)
+        stake = calculate_stake(self.max_stake, price_adjusted, side)
 
-                                # Frees this up to be done again once we have greened.
-                                # !! unhash below and the horse del_list if you want to do more bets.
-                                # del_list_back.append(selection_id)
-                                # self.matched_back_bet_tracker[market_id][selection_id] = False
+        margin = calculate_margin(side, stake, price_adjusted, bsp)
 
-                            elif order.size_matched != 0:
-                                bsp_value = tracker[market_id][selection_id][1]
-                                backed_price = tracker[market_id][selection_id][-1]
-                                self.metrics["amount_gambled"] += order.size_matched
-                                self.matched_tracker[market_id][selection_id] = True
-
-                                if (price > bsp_value and side == "BACK") or (
-                                    price < bsp_value and side == "LAY"
-                                ):
-                                    self.metrics["matched_correct"] += 1
-                                    self.metrics["back_matched_correct"] += 1
-                                    self.metrics["m_c_margin"] += margin
-                                else:
-                                    self.metrics["matched_incorrect"] += 1
-                                    self.metrics["back_matched_incorrect"] += 1
-                                    self.metrics["m_i_margin"] += margin
-
-                            elif (order.status == OrderStatus.EXECUTABLE) & (
-                                order.size_matched != 0
-                            ):
-                                bsp_value = tracker[market_id][selection_id][1]
-                                price = tracker[market_id][selection_id][-1]
-                                if self.seconds_to_start < TIME_BEFORE_START:
-                                    self.metrics["amount_gambled"] += (
-                                        order.size_matched
-                                        if side == "LAY"
-                                        else order.size_matched * (price - 1)
-                                    )
-                                    if (price > bsp_value and side == "BACK") or (
-                                        price < bsp_value and side == "LAY"
-                                    ):
-                                        self.metrics["matched_correct"] += 1
-                                        self.metrics["back_matched_correct"] += 1
-                                        self.metrics["m_c_margin"] += margin
-
-                                    else:
-                                        self.metrics["matched_incorrect"] += 1
-                                        self.metrics["back_matched_incorrect"] += 1
-                                        self.metrics["m_i_margin"] += margin
-
-                                    market.cancel_order(order)
-                                    matched_tracker[market_id][selection_id] = True
-        except Exception as e:
-            print(f"Exception during process orders function execution: {e}")
-            # for horse in del_list_back:
-            # del self.back_bet_tracker[market_id][horse]s
+        return margin
